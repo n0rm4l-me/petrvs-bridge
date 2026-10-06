@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -177,4 +178,23 @@ func TestEmulatorLargeReply(t *testing.T) {
 	r.StartAll()
 	r.Agents["laptop"].Spool.Add(wire.TypeReply, strings.Repeat("y", 200_000))
 	r.WaitSent("[cut:")
+}
+
+// The real bus does not keep order and delivers to concurrent callbacks; twenty commands typed in quick succession
+// must still reach the session in the order they were typed.
+func TestEmulatorRapidCommandsRunInOrder(t *testing.T) {
+	r, _ := emuRig(t)
+	r.StartAll()
+	a := r.Agents["laptop"]
+	r.WaitSent("laptop is connected")
+	var want []string
+	for i := 1; i <= 20; i++ {
+		s := fmt.Sprintf("rapid-%02d", i)
+		want = append(want, s)
+		r.Say(s)
+	}
+	r.Eventually("all twenty typed", func() bool { return len(a.Exec.Texts()) == 20 })
+	if got := strings.Join(a.Exec.Texts(), ","); got != strings.Join(want, ",") {
+		t.Fatalf("typed out of order:\n got %s\nwant %s", got, strings.Join(want, ","))
+	}
 }

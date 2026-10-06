@@ -66,7 +66,11 @@ Parsed strictly (unknown fields rejected). Allowed types depend on the direction
 | agent to hub | `ready`, `reply`, `notice`, `alert`, `hb`, `dropped`, `pong` |
 
 * `exp`: a command that reaches the agent after its expiry is dropped and reported. The hub sets 10 minutes for text, 1
-  minute for keys and alarm commands.
+  minute for keys and alarm commands, counted from the time the user typed the message (the chat's message date), and
+  the agent checks it again at the moment it is about to run the command.
+* `meta.n`: on `text` and `key`, the number of the command in this session, from 1. The agent runs commands in that
+  order, one at a time. A missing number is waited for `CB_REORDER_WINDOW` (2 s by default) and then reported as lost; a
+  command whose number has already been passed is refused and reported; a command without a number is refused.
 * `id`: remembered per session (1024 entries) to drop duplicates.
 * Replies, notices and alerts are queued in a spool on the agent, sent with a stable id, and the file is removed only
   after the hub answers with `rcpt` carrying that id. The hub sends the receipt only after the chat accepted the message,
@@ -74,11 +78,17 @@ Parsed strictly (unknown fields rejected). Allowed types depend on the direction
 
 ## Liveness
 
-The agent sends `hb` every heartbeat interval; the hub answers `hback`. An agent that hears nothing from the hub for the
+The agent sends `ready` as the first message of a session and repeats it every handshake interval until the hub has
+answered anything (the hub answers `ready` with `hback`). The hub starts using a new session when it first hears from
+it, and keeps up to four offered sessions per agent until one of them is proved. The agent sends `hb` every heartbeat
+interval; the hub answers `hback`. An agent that hears nothing from the hub for the
 silence limit starts a new handshake (this is how a hub restart is healed). The hub calls an agent offline after a period
 without any authenticated message and says so once.
 
 ## Lockdown
 
 `lockdown` makes the agent refuse `text` and `key` and refuse to disarm its alarm; it creates a lock file that only a local
-`agent unlock` removes. The hub stops relaying at the same time; `/unlock` on the hub does not unlock agents.
+`agent unlock` removes, and answers with a `notice` saying whether the lock reached the disk (if not, it holds until the
+agent restarts). The hub stops relaying at the same time; `/unlock` on the hub does not unlock agents. With
+`CB_LOCK_FILE` the hub's own lockdown survives a restart, and a locked-down hub repeats `lockdown` to every agent whose
+new session it accepts.

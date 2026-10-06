@@ -65,14 +65,19 @@ the chat. See [examples/claude-stop-hook.sh](examples/claude-stop-hook.sh) for a
 | `/alarm on` | arm the alarm (see below) |
 | `/alarm off [code]` | disarm; the code is needed if the agent has an alarm secret |
 | `/alarm` or `/alarm status` | state and which sensors are working |
-| `/lockdown` | the hub stops relaying and tells agents to refuse text and keys until unlocked **on their own machine** |
+| `/lockdown` | the hub stops relaying and tells agents to refuse text and keys until unlocked **on their own machine**. Always obeyed, whatever the message's age |
 | `/unlock` | the hub relays again (agents stay locked) |
 
 Only the chat id and user id you configure are obeyed; everyone else is ignored and counted.
 
-A command older than its time to live when it reaches the agent is **dropped and reported**, never typed: text lives 10
-minutes, keys and alarm commands one minute. A machine that was asleep overnight will not press buttons on a prompt you
-no longer see. The hub also refuses to queue a command for an agent it has not heard from recently.
+A command older than its time to live is **dropped and reported**, never typed: text lives 10 minutes, keys and alarm
+commands one minute, counted from when you sent the message (so a backlog that Telegram delivers after an outage of the
+hub is ignored, and the hub says so). The agent checks again just before it types. A machine that was asleep overnight
+will not press buttons on a prompt you no longer see. The hub also refuses to queue a command for an agent it has not
+heard from recently.
+
+Commands are typed **in the order you sent them**, one at a time, even though the bus does not keep order. If one goes
+missing, the ones after it wait `CB_REORDER_WINDOW` (2 s), then the missing one is reported as lost and the rest go ahead.
 
 ## Alarm mode
 
@@ -116,6 +121,8 @@ list every problem at once and exit.
 | `CB_KEY_TTL` | `-key-ttl` | `1m` | How long a key press or an alarm command stays valid |
 | `CB_POLL_TIMEOUT` | `-poll-timeout` | `25s` | Telegram long-poll timeout |
 | `CB_MAX_REPLY_BYTES` | `-max-reply-bytes` | `20000` | Longest reply shown in the chat (longer ones are cut, with a note) |
+| `CB_LOCK_FILE` | `-lock-file` | unset | File that keeps the hub's lockdown across restarts (in Kubernetes: a path on an `emptyDir`) |
+| `CB_ALLOW_GROUP_READ` | `-allow-group-read` | `false` | Also accept private files that are group-readable (0640), for a Kubernetes secret volume with `fsGroup`. Never world-readable |
 | `CB_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error`. Logs never contain message text or tokens |
 | `PUBSUB_EMULATOR_HOST` | none | unset | Use the emulator instead of the real service |
 | `GOOGLE_APPLICATION_CREDENTIALS` | none | | Standard Google credentials (or workload identity, or the metadata server) |
@@ -129,7 +136,7 @@ list every problem at once and exit.
 | `CB_HUB_PUB` | `-hub-pub` | required | The hub's public bundle, pinned at enrolment |
 | `CB_PROJECT`, `CB_PREFIX`, `CB_CREATE_RESOURCES`, `CB_LOG_LEVEL` | | as for the hub | Same meaning |
 | `CB_TMUX_SESSION` | `-tmux-session` | `claude` | The tmux session that receives the text |
-| `CB_STATE_DIR` | `-state-dir` | `$XDG_STATE_HOME/claude-bridge` or `~/.local/state/claude-bridge` | Holds `spool/`, `locked` and `alarm-armed` |
+| `CB_STATE_DIR` | `-state-dir` | `$XDG_STATE_HOME/claude-bridge` or `~/.local/state/claude-bridge` | Holds `spool/`, `locked`, `alarm-armed` and `alarm-code-state` (used one-time codes). Created with mode 0700 |
 | `CB_ALARM` | `-alarm` | `true` | Offer the alarm mode |
 | `CB_ALARM_SECRET_FILE` | none | unset | Base32 secret (0600). If set, `/alarm off` needs a one-time code |
 | `CB_ALARM_COOLDOWN` | `-alarm-cooldown` | `1m` | At most one report per sensor in this time |
@@ -138,6 +145,8 @@ list every problem at once and exit.
 | `CB_HANDSHAKE_RETRY` | `-handshake-retry` | `10s` | How often a hello is repeated until answered |
 | `CB_SILENCE_LIMIT` | `-silence-limit` | 3 x heartbeat | No answer from the hub for this long means a new handshake |
 | `CB_RECEIPT_TIMEOUT` | `-receipt-timeout` | `30s` | A queued reply is sent again if the hub has not confirmed it in this time |
+| `CB_REORDER_WINDOW` | `-reorder-window` | `2s` | How long a command waits for an earlier one that has not arrived before that one is reported lost |
+| `CB_ALLOW_GROUP_READ` | `-allow-group-read` | `false` | As for the hub |
 | `GOOGLE_APPLICATION_CREDENTIALS`, `PUBSUB_EMULATOR_HOST` | | | As for the hub |
 
 Other agent commands: `agent send [-type reply|notice|alert] [TEXT | -]` queues a message for the hub (reads standard
@@ -215,8 +224,13 @@ payloads), `internal/transport` (Pub/Sub and an in-memory bus with attack helper
 * Post-quantum protection covers the handshake (ML-KEM-768 is mixed into the session key, so recorded traffic stays safe).
   The ratchet's later key steps use X25519 only, so there is no post-quantum healing after a state theft. A sparse
   post-quantum ratchet is not implemented.
+* The agent trusts its own user. Another process of the same user can read the agent's keys, remove the lock file and
+  type into the tmux session; file modes keep other users out, nothing more. Without `CB_ALARM_SECRET_FILE` anyone who
+  controls the chat can also disarm the alarm, and the agent says so when it is armed.
 * The one-time-code gate (`internal/approval`) is used for disarming the alarm. It is not yet wired to an assistant's
   per-tool approval hook.
 * One hub replica only (two hubs would fight over one bot).
 * `examples/` and `deploy/` are provided as starting points; the Kubernetes and systemd files have not been run.
+* A flood of forged packets with new keys is cut off cheaply, but while the receiver's budget of new-key agreements
+  (20 burst, 5 a second) is empty a real message that needs a new key is refused until it refills. The session is not harmed.
 * No license has been chosen yet. Choose one before publishing.

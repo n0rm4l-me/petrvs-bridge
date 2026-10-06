@@ -27,6 +27,9 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532                 # lets the non-root user read the mounted secret (mode 0440 below)
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: hub
@@ -41,17 +44,22 @@ spec:
             - {name: CB_IDENTITY, value: /keys/hub.identity.json}
             - {name: CB_AGENTS_DIR, value: /agents}
             - {name: CB_CHAT_ID, value: "CHAT_ID"}
+            - {name: CB_ALLOW_GROUP_READ, value: "true"}      # the secret volume is group-readable because of fsGroup
+            - {name: CB_LOCK_FILE, value: /state/lockdown}    # survives a container restart, not a deleted pod
             - name: TELEGRAM_BOT_TOKEN
               valueFrom: {secretKeyRef: {name: claude-bridge-bot, key: token}}
           resources:
             requests: {cpu: 50m, memory: 64Mi}
-            limits: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 100m, memory: 128Mi}
           volumeMounts:
             - {name: keys, mountPath: /keys, readOnly: true}
             - {name: agents, mountPath: /agents, readOnly: true}
+            - {name: state, mountPath: /state}
       volumes:
+        - name: state
+          emptyDir: {sizeLimit: 1Mi}
         - name: keys
-          secret: {secretName: claude-bridge-hub-identity, defaultMode: 0400}
+          secret: {secretName: claude-bridge-hub-identity, defaultMode: 0440}
         - name: agents
           configMap: {name: claude-bridge-agents}
 ---
