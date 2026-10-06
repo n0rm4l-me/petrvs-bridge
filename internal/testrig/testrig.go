@@ -400,3 +400,74 @@ func (r *Rig) WaitSent(sub string) {
 	r.T.Helper()
 	r.Eventually(fmt.Sprintf("a chat message containing %q", sub), func() bool { return r.Sent(sub) })
 }
+
+// Emulator connects to the Pub/Sub emulator and creates the topics and subscriptions a rig needs. It skips the
+// test when PUBSUB_EMULATOR_HOST is not set. The returned prefix is unique to the test.
+func Emulator(t *testing.T, agents ...string) (*transport.PubSub, string) {
+	t.Helper()
+	if os.Getenv("PUBSUB_EMULATOR_HOST") == "" {
+		t.Skip("PUBSUB_EMULATOR_HOST not set; run scripts/with-emulator.sh go test ./...")
+	}
+	if len(agents) == 0 {
+		agents = []string{"laptop"}
+	}
+	ctx := context.Background()
+	p, err := transport.NewPubSub(ctx, "cb-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := fmt.Sprintf("e%d", time.Now().UnixNano()%1_000_000_000)
+	names := wire.Names{Prefix: prefix}
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(p.EnsureTopic(ctx, names.ToHub()))
+	must(p.EnsureSubscription(ctx, names.ToHub(), names.HubSub(), 10*time.Second))
+	t.Cleanup(func() { p.Delete(context.Background(), names.ToHub(), names.HubSub()) })
+	for _, a := range agents {
+		must(p.EnsureTopic(ctx, names.ToAgent(a)))
+		must(p.EnsureSubscription(ctx, names.ToAgent(a), names.AgentSub(a), 10*time.Second))
+		a := a
+		t.Cleanup(func() { p.Delete(context.Background(), names.ToAgent(a), names.AgentSub(a)) })
+	}
+	t.Cleanup(func() { p.Close() })
+	return p, prefix
+}
+
+// Tap records everything published to a topic through a subscription of its own, for replay tests.
+type Tap struct {
+	mu   sync.Mutex
+	msgs []*transport.Message
+}
+
+// NewTap starts recording a topic.
+func NewTap(t *testing.T, p *transport.PubSub, topic string) *Tap {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	sub := topic + "-tap"
+	if err := p.EnsureSubscription(ctx, topic, sub, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	tap := &Tap{}
+	done := make(chan struct{})
+	go func() {
+		p.Receive(ctx, sub, func(_ context.Context, m *transport.Message) {
+			tap.mu.Lock()
+			tap.msgs = append(tap.msgs, m)
+			tap.mu.Unlock()
+			m.Ack()
+		})
+		close(done)
+	}()
+	t.Cleanup(func() { cancel(); <-done; p.Delete(context.Background(), "", sub) })
+	return tap
+}
+
+// Messages returns what was recorded so far.
+func (tp *Tap) Messages() []*transport.Message {
+	tp.mu.Lock()
+	defer tp.mu.Unlock()
+	return append([]*transport.Message(nil), tp.msgs...)
+}
