@@ -1,0 +1,71 @@
+# A sketch of the hub on Kubernetes. NOT YET APPLIED OR RUN. Replace the placeholders.
+# The hub needs: its private identity and the agents' public bundles (mounted from a secret and a config map),
+# the bot token (a secret), and Pub/Sub access through workload identity (no key file).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: claude-bridge-hub
+  annotations:
+    iam.gke.io/gcp-service-account: HUB_SA@PROJECT.iam.gserviceaccount.com   # workload identity
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude-bridge-hub
+spec:
+  replicas: 1                      # two hubs would fight over one bot
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: claude-bridge-hub}
+  template:
+    metadata:
+      labels: {app: claude-bridge-hub}
+    spec:
+      serviceAccountName: claude-bridge-hub
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: hub
+          image: REGISTRY/claude-bridge-hub@sha256:DIGEST
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          env:
+            - {name: CB_PROJECT, value: PROJECT}
+            - {name: CB_PREFIX, value: cb}
+            - {name: CB_IDENTITY, value: /keys/hub.identity.json}
+            - {name: CB_AGENTS_DIR, value: /agents}
+            - {name: CB_CHAT_ID, value: "CHAT_ID"}
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom: {secretKeyRef: {name: claude-bridge-bot, key: token}}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 50m, memory: 64Mi}
+          volumeMounts:
+            - {name: keys, mountPath: /keys, readOnly: true}
+            - {name: agents, mountPath: /agents, readOnly: true}
+      volumes:
+        - name: keys
+          secret: {secretName: claude-bridge-hub-identity, defaultMode: 0400}
+        - name: agents
+          configMap: {name: claude-bridge-agents}
+---
+# Only outbound traffic to Telegram and Google APIs is needed; nothing listens.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: claude-bridge-hub
+spec:
+  podSelector:
+    matchLabels: {app: claude-bridge-hub}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}

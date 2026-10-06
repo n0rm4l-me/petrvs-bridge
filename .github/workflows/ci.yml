@@ -1,0 +1,14 @@
+# Unit and in-memory end-to-end tests. The emulator tests are skipped here (no PUBSUB_EMULATOR_HOST);
+# run `make test-emulator` locally. NOT YET RUN on a hosted runner.
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version-file: go.mod}
+      - run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
