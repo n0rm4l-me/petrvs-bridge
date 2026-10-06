@@ -5,6 +5,8 @@ package spool
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,9 @@ import (
 
 // MaxFiles bounds how much a runaway writer can queue.
 const MaxFiles = 1000
+
+// maxFileBytes bounds what is read back from one file: a body plus the JSON around it. A larger file is not ours.
+const maxFileBytes = wire.MaxBody*2 + 4096
 
 // ErrFull is returned when the spool holds MaxFiles messages.
 var ErrFull = errors.New("spool: full")
@@ -93,7 +98,31 @@ func (s *Spool) Add(t wire.Type, body string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), filepath.Join(s.dir, fmt.Sprintf("%020d-%d.json", time.Now().UnixNano(), os.Getpid())))
+	var salt [4]byte
+	rand.Read(salt[:])
+	return os.Rename(tmp.Name(), filepath.Join(s.dir, fmt.Sprintf("%020d-%d-%s.json", time.Now().UnixNano(), os.Getpid(), hex.EncodeToString(salt[:]))))
+}
+
+// read loads one file, setting aside (as .bad) anything too large or malformed. ok is false for such files.
+func (s *Spool) read(name string) (it Item, ok bool, err error) {
+	path := filepath.Join(s.dir, name)
+	st, err := os.Stat(path)
+	if err != nil {
+		return it, false, err
+	}
+	if st.Size() > maxFileBytes {
+		os.Rename(path, path+".bad")
+		return it, false, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return it, false, err
+	}
+	if json.Unmarshal(data, &it) != nil || (it.Type != wire.TypeReply && it.Type != wire.TypeNotice && it.Type != wire.TypeAlert) || len(it.Body) > wire.MaxBody {
+		os.Rename(path, path+".bad")
+		return it, false, nil
+	}
+	return it, true, nil
 }
 
 // Entry is a queued message with the name of its file.
@@ -110,14 +139,8 @@ func (s *Spool) List() ([]Entry, error) {
 	}
 	var out []Entry
 	for _, n := range names {
-		path := filepath.Join(s.dir, n)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var it Item
-		if json.Unmarshal(data, &it) != nil || (it.Type != wire.TypeReply && it.Type != wire.TypeNotice && it.Type != wire.TypeAlert) {
-			os.Rename(path, path+".bad")
+		it, ok, err := s.read(n)
+		if err != nil || !ok {
 			continue
 		}
 		out = append(out, Entry{Name: n, Item: it})
@@ -157,13 +180,11 @@ func (s *Spool) Drain(ctx context.Context, publish func(context.Context, Item) e
 			return sent, err
 		}
 		path := filepath.Join(s.dir, n)
-		data, err := os.ReadFile(path)
+		it, ok, err := s.read(n)
 		if err != nil {
 			return sent, err
 		}
-		var it Item
-		if json.Unmarshal(data, &it) != nil || (it.Type != wire.TypeReply && it.Type != wire.TypeNotice && it.Type != wire.TypeAlert) {
-			os.Rename(path, path+".bad")
+		if !ok {
 			continue
 		}
 		if err := publish(ctx, it); err != nil {

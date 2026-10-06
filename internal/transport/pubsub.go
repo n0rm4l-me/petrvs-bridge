@@ -51,8 +51,10 @@ func (p *PubSub) Publish(ctx context.Context, topic string, data []byte, attrs m
 // Receive delivers messages from the subscription to handler until ctx ends.
 func (p *PubSub) Receive(ctx context.Context, subscription string, handler func(context.Context, *Message)) error {
 	s := p.client.Subscriber(subscription)
-	s.ReceiveSettings.MaxOutstandingMessages = 64
-	s.ReceiveSettings.NumGoroutines = 2
+	// Bound what a flood on the topic can make this process hold and work on at once.
+	s.ReceiveSettings.MaxOutstandingMessages = 32
+	s.ReceiveSettings.MaxOutstandingBytes = 16 << 20
+	s.ReceiveSettings.NumGoroutines = 1
 	return s.Receive(ctx, func(ctx context.Context, m *pubsub.Message) {
 		attempt := 1
 		if m.DeliveryAttempt != nil {

@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,6 +26,9 @@ type Common struct {
 	Identity        string // path of this party's private identity file
 	LogLevel        string // debug, info, warn, error
 	CreateResources bool   // create topics and subscriptions (development and the emulator only)
+	// AllowGroupRead lets private files (identity, secrets) be readable by their group, for example a Kubernetes
+	// secret volume with fsGroup. Other users still may not read them.
+	AllowGroupRead bool
 }
 
 // Hub holds the hub's settings.
@@ -40,6 +44,7 @@ type Hub struct {
 	KeyTTL        time.Duration
 	PollTimeout   time.Duration
 	MaxReplyBytes int
+	LockFile      string // keeps a lockdown across restarts of the hub; empty means it does not
 }
 
 // Agent holds the agent's settings.
@@ -60,6 +65,8 @@ type Agent struct {
 	Handshake      time.Duration
 	Silence        time.Duration
 	ReceiptTimeout time.Duration
+	ReorderWindow  time.Duration
+	AlarmCodeState string // where used one-time codes are remembered across restarts
 }
 
 type env struct {
@@ -112,13 +119,9 @@ func (e *env) boolean(key string, def bool) bool {
 	return def
 }
 
-func readSecretFile(path string) (string, error) {
-	st, err := os.Stat(path)
-	if err != nil {
+func readSecretFile(path string, allowGroupRead bool) (string, error) {
+	if err := identity.CheckPrivateMode(path, allowGroupRead); err != nil {
 		return "", err
-	}
-	if st.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("%s is readable by other users (mode %v); chmod 600", path, st.Mode().Perm())
 	}
 	b, err := os.ReadFile(path)
 	return strings.TrimSpace(string(b)), err
@@ -144,6 +147,27 @@ func common(fs *flag.FlagSet, e *env, c *Common) {
 	fs.StringVar(&c.Identity, "identity", e.str("CB_IDENTITY", ""), "path of the private identity file (env CB_IDENTITY)")
 	fs.StringVar(&c.LogLevel, "log-level", e.str("CB_LOG_LEVEL", "info"), "debug, info, warn or error (env CB_LOG_LEVEL)")
 	fs.BoolVar(&c.CreateResources, "create-resources", e.boolean("CB_CREATE_RESOURCES", false), "create topics and subscriptions; development and the emulator only (env CB_CREATE_RESOURCES)")
+	fs.BoolVar(&c.AllowGroupRead, "allow-group-read", e.boolean("CB_ALLOW_GROUP_READ", false), "accept private files that their group may read, for a Kubernetes secret volume with fsGroup (env CB_ALLOW_GROUP_READ)")
+}
+
+// checkTelegramBase refuses a Bot API address that would send the bot token over plain HTTP to another machine.
+func checkTelegramBase(e *env, base string) {
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		e.err = append(e.err, "telegram-api: not a valid URL")
+		return
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		switch u.Hostname() {
+		case "localhost", "127.0.0.1", "::1":
+		default:
+			e.err = append(e.err, "telegram-api: plain http is accepted only for localhost; the bot token would cross the network in the clear")
+		}
+	default:
+		e.err = append(e.err, "telegram-api: use an https URL")
+	}
 }
 
 func (c *Common) validate(e *env, needProject bool) {
@@ -188,6 +212,7 @@ func ParseHub(args []string, getenv func(string) string) (*Hub, error) {
 	fs.DurationVar(&h.KeyTTL, "key-ttl", e.dur("CB_KEY_TTL", time.Minute), "how long a key press or alarm command stays valid (env CB_KEY_TTL)")
 	fs.DurationVar(&h.PollTimeout, "poll-timeout", e.dur("CB_POLL_TIMEOUT", 25*time.Second), "Telegram long-poll timeout (env CB_POLL_TIMEOUT)")
 	fs.IntVar(&h.MaxReplyBytes, "max-reply-bytes", int(e.int64("CB_MAX_REPLY_BYTES")), "longest reply shown in the chat; 0 means 20000 (env CB_MAX_REPLY_BYTES)")
+	fs.StringVar(&h.LockFile, "lock-file", e.str("CB_LOCK_FILE", ""), "file that keeps a lockdown across restarts of the hub; empty means a restart ends it (env CB_LOCK_FILE)")
 	if err := fs.Parse(args); err != nil {
 		return nil, fmt.Errorf("hub: %w", err)
 	}
@@ -195,6 +220,7 @@ func ParseHub(args []string, getenv func(string) string) (*Hub, error) {
 		h.UserID = h.ChatID
 	}
 	h.validate(e, !emulator(e))
+	checkTelegramBase(e, h.TelegramBase)
 	if h.AgentsDir == "" {
 		e.err = append(e.err, "agents-dir: set CB_AGENTS_DIR or -agents-dir")
 	}
@@ -205,7 +231,7 @@ func ParseHub(args []string, getenv func(string) string) (*Hub, error) {
 	case getenv("TELEGRAM_BOT_TOKEN") != "":
 		h.Token = strings.TrimSpace(getenv("TELEGRAM_BOT_TOKEN"))
 	case getenv("CB_TELEGRAM_TOKEN_FILE") != "":
-		tok, err := readSecretFile(getenv("CB_TELEGRAM_TOKEN_FILE"))
+		tok, err := readSecretFile(getenv("CB_TELEGRAM_TOKEN_FILE"), h.AllowGroupRead)
 		if err != nil {
 			e.err = append(e.err, "CB_TELEGRAM_TOKEN_FILE: "+err.Error())
 		}
@@ -234,6 +260,7 @@ func ParseAgent(args []string, getenv func(string) string) (*Agent, error) {
 	fs.DurationVar(&a.Heartbeat, "heartbeat", e.dur("CB_HEARTBEAT", 30*time.Second), "heartbeat interval (env CB_HEARTBEAT)")
 	fs.DurationVar(&a.Handshake, "handshake-retry", e.dur("CB_HANDSHAKE_RETRY", 10*time.Second), "how often a hello is repeated until answered (env CB_HANDSHAKE_RETRY)")
 	fs.DurationVar(&a.Silence, "silence-limit", e.dur("CB_SILENCE_LIMIT", 0), "no answer from the hub for this long means a new handshake; 0 means 3 x heartbeat (env CB_SILENCE_LIMIT)")
+	fs.DurationVar(&a.ReorderWindow, "reorder-window", e.dur("CB_REORDER_WINDOW", 2*time.Second), "how long a command waits for an earlier one that has not arrived before that one is reported lost (env CB_REORDER_WINDOW)")
 	fs.DurationVar(&a.ReceiptTimeout, "receipt-timeout", e.dur("CB_RECEIPT_TIMEOUT", 30*time.Second), "a spooled message is sent again if not confirmed in this time (env CB_RECEIPT_TIMEOUT)")
 	if err := fs.Parse(args); err != nil {
 		return nil, fmt.Errorf("agent: %w", err)
@@ -248,8 +275,9 @@ func ParseAgent(args []string, getenv func(string) string) (*Agent, error) {
 	a.SpoolDir = filepath.Join(a.StateDir, "spool")
 	a.LockFile = filepath.Join(a.StateDir, "locked")
 	a.AlarmState = filepath.Join(a.StateDir, "alarm-armed")
+	a.AlarmCodeState = filepath.Join(a.StateDir, "alarm-code-state")
 	if f := getenv("CB_ALARM_SECRET_FILE"); f != "" {
-		b32, err := readSecretFile(f)
+		b32, err := readSecretFile(f, a.AllowGroupRead)
 		if err != nil {
 			e.err = append(e.err, "CB_ALARM_SECRET_FILE: "+err.Error())
 		} else if secret, err := decodeSecret(b32); err != nil {

@@ -22,7 +22,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +49,7 @@ var (
 	ErrReplay    = errors.New("handshake: hello already seen")
 	ErrRef       = errors.New("handshake: ack does not answer our hello")
 	ErrPeer      = errors.New("handshake: message is not from the pinned peer or not for us")
+	ErrTooMany   = errors.New("handshake: too many recent hellos")
 )
 
 // Message is a hello or an ack. It travels in the clear; the signature covers every field.
@@ -306,32 +307,49 @@ func Respond(id *identity.Identity, peer identity.Public, hello *Message, now ti
 	return ack, &Result{SessionKey: key, SessionID: sid, OwnRatchetKey: eph}, nil
 }
 
+// VerifyHello checks a hello's shape, direction, freshness and signature without recording anything. It is the cheap
+// test to run before rate limiting and before the expensive part of Respond.
+func VerifyHello(id *identity.Identity, peer identity.Public, hello *Message, now time.Time) error {
+	return hello.verify(KindHello, id.Name, peer, now)
+}
+
 // Guard remembers recent hello nonces so a captured hello cannot be replayed
 // to reset a session. It is bounded and forgets entries older than the skew window.
 type Guard struct {
-	mu   sync.Mutex
-	seen map[string]time.Time
-	max  int
+	mu        sync.Mutex
+	seen      map[string]time.Time
+	max       int
+	perSender int
 }
 
 // NewGuard returns a guard holding at most max nonces.
-func NewGuard(max int) *Guard { return &Guard{seen: map[string]time.Time{}, max: max} }
+func NewGuard(max int) *Guard { return &Guard{seen: map[string]time.Time{}, max: max, perSender: max} }
+
+// NewGuardPerSender also caps how many nonces one sender may hold, so one pinned party that misbehaves (or whose key
+// leaked) cannot fill the guard and lock the others out.
+func NewGuardPerSender(max, perSender int) *Guard {
+	return &Guard{seen: map[string]time.Time{}, max: max, perSender: perSender}
+}
 
 // Check records the hello's nonce and reports ErrReplay if it was already seen.
 func (g *Guard) Check(m *Message, now time.Time) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	own := 0
+	prefix := m.From + "|"
 	for k, t := range g.seen {
 		if now.Sub(t) > 2*MaxSkew {
 			delete(g.seen, k)
+		} else if strings.HasPrefix(k, prefix) {
+			own++
 		}
 	}
-	key := m.From + "|" + string(m.Nonce)
+	key := prefix + string(m.Nonce)
 	if _, dup := g.seen[key]; dup {
 		return ErrReplay
 	}
-	if len(g.seen) >= g.max {
-		return fmt.Errorf("handshake: too many recent hellos")
+	if len(g.seen) >= g.max || own >= g.perSender {
+		return ErrTooMany
 	}
 	g.seen[key] = now
 	return nil

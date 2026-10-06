@@ -41,7 +41,7 @@ func run(args []string, getenv func(string) string) int {
 		return 2
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level(cfg.LogLevel)}))
-	id, err := identity.Load(cfg.Identity)
+	id, err := identity.LoadOpts(cfg.Identity, cfg.AllowGroupRead)
 	if err != nil {
 		log.Error("cannot load the hub identity", "err", err)
 		return 1
@@ -89,6 +89,7 @@ func run(args []string, getenv func(string) string) int {
 		Identity: id, Agents: agents, Transport: tr, Names: names,
 		Telegram: telegram.NewHTTP(cfg.Token).WithBaseURL(cfg.TelegramBase), ChatID: cfg.ChatID, UserID: cfg.UserID, Log: log,
 		OfflineAfter: cfg.OfflineAfter, TextTTL: cfg.TextTTL, KeyTTL: cfg.KeyTTL, PollTimeout: cfg.PollTimeout, MaxReplyBytes: cfg.MaxReplyBytes,
+		LockFile: cfg.LockFile,
 	})
 	if err != nil {
 		log.Error("invalid hub configuration", "err", err)

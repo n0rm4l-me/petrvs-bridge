@@ -26,6 +26,7 @@ type Update struct {
 	UserID    int64
 	MessageID int64
 	Text      string
+	Date      time.Time // when Telegram received the message; zero when unknown
 }
 
 // Client is what the hub needs from Telegram.
@@ -77,11 +78,17 @@ func clean(method string, err error) error {
 	return fmt.Errorf("telegram %s: %w", method, err)
 }
 
-func (c *HTTP) call(ctx context.Context, method string, body any) (*apiResponse, error) {
+// slack is how long a call may run beyond the wait it asked the server for.
+const slack = 15 * time.Second
+
+func (c *HTTP) call(ctx context.Context, method string, body any, within time.Duration) (*apiResponse, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
+	// A connection that goes quiet (a middlebox that drops packets) must not hang the hub for ever.
+	ctx, cancel := context.WithTimeout(ctx, within)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/bot"+c.token+"/"+method, bytes.NewReader(raw))
 	if err != nil {
 		return nil, clean(method, err)
@@ -107,7 +114,7 @@ func (c *HTTP) call(ctx context.Context, method string, body any) (*apiResponse,
 
 // GetUpdates long-polls for new text messages. Updates without text are skipped but still advance the offset.
 func (c *HTTP) GetUpdates(ctx context.Context, offset int64, timeout time.Duration) ([]Update, error) {
-	out, err := c.call(ctx, "getUpdates", map[string]any{"offset": offset, "timeout": int(timeout.Seconds()), "allowed_updates": []string{"message"}})
+	out, err := c.call(ctx, "getUpdates", map[string]any{"offset": offset, "timeout": int(timeout.Seconds()), "allowed_updates": []string{"message"}}, timeout+slack)
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +122,7 @@ func (c *HTTP) GetUpdates(ctx context.Context, offset int64, timeout time.Durati
 		UpdateID int64 `json:"update_id"`
 		Message  *struct {
 			MessageID int64  `json:"message_id"`
+			Date      int64  `json:"date"`
 			Text      string `json:"text"`
 			From      *struct {
 				ID int64 `json:"id"`
@@ -132,6 +140,9 @@ func (c *HTTP) GetUpdates(ctx context.Context, offset int64, timeout time.Durati
 		u := Update{ID: r.UpdateID}
 		if r.Message != nil {
 			u.ChatID, u.MessageID, u.Text = r.Message.Chat.ID, r.Message.MessageID, r.Message.Text
+			if r.Message.Date > 0 {
+				u.Date = time.Unix(r.Message.Date, 0)
+			}
 			if r.Message.From != nil {
 				u.UserID = r.Message.From.ID
 			}
@@ -165,7 +176,7 @@ func Chunks(text string, max int) []string {
 func (c *HTTP) Send(ctx context.Context, chatID int64, text string) error {
 	for _, part := range Chunks(text, MaxMessage) {
 		for attempt := 0; ; attempt++ {
-			_, err := c.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": part, "disable_web_page_preview": true})
+			_, err := c.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": part, "disable_web_page_preview": true}, 30*time.Second)
 			var rl ErrRateLimited
 			if errors.As(err, &rl) && attempt < 2 {
 				wait := rl.After

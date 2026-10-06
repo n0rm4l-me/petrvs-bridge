@@ -14,7 +14,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,7 +49,13 @@ type Config struct {
 	HelloMinInterval time.Duration // default 3s per agent
 	PollTimeout      time.Duration // default 25s
 	MaxReplyBytes    int           // default 20000
+	// LockFile, if set, keeps a lockdown across restarts of the hub: it exists while the hub is locked down.
+	LockFile string
 }
+
+// maxPending is how many unproven sessions the hub keeps per agent. An agent repeats its hello until it is answered,
+// so more than one may be in flight; only one of them will be used.
+const maxPending = 4
 
 // Stats counts events without recording content.
 type Stats struct {
@@ -57,11 +65,13 @@ type Stats struct {
 type sess struct {
 	sid [8]byte
 	r   *ratchet.Ratchet
+	seq uint64 // last command number given in this session
 }
 
 type agentState struct {
 	pub           identity.Public
-	cur, pending  *sess
+	cur           *sess
+	pending       []*sess // offered, not yet proved by a message from the agent
 	lastHello     time.Time
 	lastSeen      time.Time
 	seenIDs       map[string]struct{}
@@ -81,6 +91,9 @@ type Hub struct {
 	agents map[string]*agentState
 	active string
 	locked bool
+
+	lastUnauthLog    time.Time
+	unauthSuppressed int
 
 	unauthorized, rejected, hellos, hellosRefused, relayed atomic.Uint64
 }
@@ -116,7 +129,12 @@ func New(cfg Config) (*Hub, error) {
 	if cfg.MaxReplyBytes <= 0 {
 		cfg.MaxReplyBytes = 20000
 	}
-	h := &Hub{cfg: cfg, log: cfg.Log.With("role", "hub"), guard: handshake.NewGuard(4096), agents: map[string]*agentState{}}
+	h := &Hub{cfg: cfg, log: cfg.Log.With("role", "hub"), guard: handshake.NewGuardPerSender(4096, 128), agents: map[string]*agentState{}}
+	if cfg.LockFile != "" {
+		if _, err := os.Stat(cfg.LockFile); err == nil {
+			h.locked = true // a lockdown survives a restart; only /unlock ends it
+		}
+	}
 	for _, p := range cfg.Agents {
 		if err := p.Validate(); err != nil {
 			return nil, err
@@ -157,7 +175,7 @@ func (h *Hub) Online(agent string) bool {
 // reconnecting is true while a new session has been offered but has not yet proved itself. Commands sealed
 // for the old session would be lost in that window, so none are sent.
 func (st *agentState) reconnecting(now time.Time) bool {
-	return st.pending != nil && now.Sub(st.lastHello) < 15*time.Second
+	return len(st.pending) > 0 && now.Sub(st.lastHello) < 15*time.Second
 }
 
 // Run serves until ctx ends.
@@ -227,19 +245,45 @@ func (h *Hub) telegramLoop(ctx context.Context) {
 				continue
 			}
 			if u.ChatID != h.cfg.ChatID || u.UserID != h.cfg.UserID {
-				h.unauthorized.Add(1)
-				h.log.Warn("ignored a message from an unauthorised sender", "chat", u.ChatID, "user", u.UserID)
+				h.noteUnauthorized(u.ChatID, u.UserID)
 				continue
 			}
-			h.HandleText(ctx, u.Text)
+			h.handle(ctx, u.Text, u.Date)
 		}
+	}
+}
+
+// noteUnauthorized counts a message from someone who is not the configured user, and logs it at most once a minute so
+// that a stranger cannot fill the log.
+func (h *Hub) noteUnauthorized(chat, user int64) {
+	h.unauthorized.Add(1)
+	now := h.cfg.Now()
+	h.mu.Lock()
+	quiet := now.Sub(h.lastUnauthLog) < time.Minute
+	skipped := h.unauthSuppressed
+	if quiet {
+		h.unauthSuppressed++
+	} else {
+		h.lastUnauthLog, h.unauthSuppressed = now, 0
+	}
+	h.mu.Unlock()
+	if !quiet {
+		h.log.Warn("ignored a message from an unauthorised sender", "chat", chat, "user", user, "also_since_last_log", skipped)
 	}
 }
 
 var keyCommands = map[string]string{"/enter": "Enter", "/esc": "Escape", "/up": "Up", "/down": "Down", "/tab": "Tab"}
 
-// HandleText interprets one message from the authorised user.
-func (h *Hub) HandleText(ctx context.Context, text string) {
+// HandleText interprets one message from the authorised user, as if it had just been typed.
+func (h *Hub) HandleText(ctx context.Context, text string) { h.handle(ctx, text, time.Time{}) }
+
+// stale reports whether a message typed at sentAt is older than ttl. Telegram keeps undelivered messages for a day,
+// and a hub that was away must not act on yesterday's "/enter" or "yes" when it comes back. An unknown date is not stale.
+func (h *Hub) stale(sentAt time.Time, ttl time.Duration) bool {
+	return !sentAt.IsZero() && h.cfg.Now().Sub(sentAt) > ttl
+}
+
+func (h *Hub) handle(ctx context.Context, text string, sentAt time.Time) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
@@ -251,26 +295,30 @@ func (h *Hub) HandleText(ctx context.Context, text string) {
 			h.say(ctx, "Use @name text, with the name of a known agent. /agents lists them.")
 			return
 		}
-		h.deliver(ctx, name, wire.TypeText, rest, h.cfg.TextTTL)
+		h.deliver(ctx, name, wire.TypeText, rest, h.cfg.TextTTL, sentAt)
 		return
 	}
 	if !strings.HasPrefix(text, "/") {
-		h.deliver(ctx, h.activeName(), wire.TypeText, text, h.cfg.TextTTL)
+		h.deliver(ctx, h.activeName(), wire.TypeText, text, h.cfg.TextTTL, sentAt)
 		return
 	}
 	cmd, arg, _ := strings.Cut(text, " ")
 	arg = strings.TrimSpace(arg)
 	cmd = strings.ToLower(cmd)
 	if key, ok := keyCommands[cmd]; ok {
-		h.deliver(ctx, h.activeName(), wire.TypeKey, key, h.cfg.KeyTTL)
+		h.deliver(ctx, h.activeName(), wire.TypeKey, key, h.cfg.KeyTTL, sentAt)
 		return
 	}
 	switch cmd {
 	case "/key":
-		h.deliver(ctx, h.activeName(), wire.TypeKey, arg, h.cfg.KeyTTL)
+		h.deliver(ctx, h.activeName(), wire.TypeKey, arg, h.cfg.KeyTTL, sentAt)
 	case "/agents", "/status":
 		h.say(ctx, h.statusText())
 	case "/agent":
+		if h.stale(sentAt, h.cfg.KeyTTL) {
+			h.say(ctx, "⚠️ Ignored an old /agent command.")
+			return
+		}
 		if _, ok := h.lookup(arg); !ok {
 			h.say(ctx, "Unknown agent. /agents lists them.")
 			return
@@ -283,13 +331,22 @@ func (h *Hub) HandleText(ctx context.Context, text string) {
 		if arg == "" {
 			arg = "status"
 		}
-		h.deliver(ctx, h.activeName(), wire.TypeAlarm, arg, h.cfg.KeyTTL)
-	case "/lockdown":
+		h.deliver(ctx, h.activeName(), wire.TypeAlarm, arg, h.cfg.KeyTTL, sentAt)
+	case "/lockdown": // never stale: locking is always the safe direction
 		h.lockdown(ctx)
 	case "/unlock":
+		if h.stale(sentAt, h.cfg.KeyTTL) {
+			h.say(ctx, "⚠️ Ignored an old /unlock. Send it again if you still want it.")
+			return
+		}
 		h.mu.Lock()
 		h.locked = false
 		h.mu.Unlock()
+		if h.cfg.LockFile != "" {
+			if err := os.Remove(h.cfg.LockFile); err != nil && !os.IsNotExist(err) {
+				h.log.Warn("could not remove the hub's lock file", "err", err)
+			}
+		}
 		h.say(ctx, "The hub relays again. Agents that were locked stay locked until someone unlocks them on their own machine.")
 	default:
 		h.say(ctx, "Unknown command. Known: /agents /agent NAME /enter /esc /up /down /tab /key N /alarm on|off|status /lockdown /unlock, or @name text.")
@@ -350,9 +407,17 @@ func newID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// deliver seals a command for one agent and publishes it.
-func (h *Hub) deliver(ctx context.Context, agent string, t wire.Type, body string, ttl time.Duration) {
+// deliver seals a command for one agent and publishes it. The command is valid for ttl from the moment the user typed
+// it (sentAt, or now when that is unknown), so time spent in the chat's queue counts against it.
+func (h *Hub) deliver(ctx context.Context, agent string, t wire.Type, body string, ttl time.Duration, sentAt time.Time) {
 	now := h.cfg.Now()
+	if sentAt.IsZero() || sentAt.After(now) {
+		sentAt = now
+	}
+	if now.Sub(sentAt) > ttl {
+		h.say(ctx, "⚠️ Ignored a message that was already older than its validity ("+ttl.String()+"). Send it again if you still want it.")
+		return
+	}
 	h.mu.Lock()
 	locked := h.locked
 	st := h.agents[agent]
@@ -378,7 +443,14 @@ func (h *Hub) deliver(ctx context.Context, agent string, t wire.Type, body strin
 		h.say(ctx, "⚠️ "+agent+" is offline (last heard "+silent.Round(time.Second).String()+" ago). Not sent.")
 		return
 	}
-	p := &wire.Payload{ID: newID(), Type: t, Body: body, TS: now.Unix(), Exp: now.Add(ttl).Unix()}
+	p := &wire.Payload{ID: newID(), Type: t, Body: body, TS: now.Unix(), Exp: sentAt.Add(ttl).Unix()}
+	if t == wire.TypeText || t == wire.TypeKey {
+		// Commands are numbered so the agent can run them in the order they were typed even if the bus reorders them.
+		h.mu.Lock()
+		s.seq++
+		p.Meta = map[string]string{wire.MetaSeq: strconv.FormatUint(s.seq, 10)}
+		h.mu.Unlock()
+	}
 	data, err := wire.Seal(s.r, h.cfg.Identity.Name, agent, s.sid, p)
 	switch {
 	case errors.Is(err, ratchet.ErrNoSendChain):
@@ -397,6 +469,17 @@ func (h *Hub) deliver(ctx context.Context, agent string, t wire.Type, body strin
 }
 
 func (h *Hub) lockdown(ctx context.Context) {
+	keptNote := ""
+	if h.cfg.LockFile != "" {
+		err := os.MkdirAll(filepath.Dir(h.cfg.LockFile), 0o700)
+		if err == nil {
+			err = os.WriteFile(h.cfg.LockFile, []byte("lockdown\n"), 0o600)
+		}
+		if err != nil {
+			h.log.Warn("could not keep the lockdown across restarts", "err", err)
+			keptNote = " It will not survive a restart of the hub (the lock file could not be written)."
+		}
+	}
 	h.mu.Lock()
 	h.locked = true
 	type target struct {
@@ -412,12 +495,16 @@ func (h *Hub) lockdown(ctx context.Context) {
 	h.mu.Unlock()
 	now := h.cfg.Now()
 	for _, t := range ts {
-		p := &wire.Payload{ID: newID(), Type: wire.TypeLockdown, TS: now.Unix(), Exp: now.Add(time.Hour).Unix()}
-		if data, err := wire.Seal(t.s.r, h.cfg.Identity.Name, t.name, t.s.sid, p); err == nil {
-			h.cfg.Transport.Publish(ctx, h.cfg.Names.ToAgent(t.name), data, wire.Attrs(wire.KindMsg, t.name))
-		}
+		h.sendLockdown(ctx, t.name, t.s, now)
 	}
-	h.say(ctx, fmt.Sprintf("Lockdown: the hub stopped relaying and told %d agent(s) to refuse text and keys until unlocked on their own machine.", len(ts)))
+	h.say(ctx, fmt.Sprintf("Lockdown: the hub stopped relaying and told %d agent(s) to refuse text and keys until unlocked on their own machine.%s", len(ts), keptNote))
+}
+
+func (h *Hub) sendLockdown(ctx context.Context, agent string, s *sess, now time.Time) {
+	p := &wire.Payload{ID: newID(), Type: wire.TypeLockdown, TS: now.Unix(), Exp: now.Add(time.Hour).Unix()}
+	if data, err := wire.Seal(s.r, h.cfg.Identity.Name, agent, s.sid, p); err == nil {
+		h.cfg.Transport.Publish(ctx, h.cfg.Names.ToAgent(agent), data, wire.Attrs(wire.KindMsg, agent))
+	}
 }
 
 // ---- bus side ----
@@ -459,6 +546,21 @@ func (h *Hub) onHello(ctx context.Context, m *transport.Message) {
 	pub := st.pub
 	h.mu.Unlock()
 	now := h.cfg.Now()
+	// Cheap checks first: the signature proves the hello is the pinned agent's, and only then is it worth counting
+	// against that agent's rate or spending a key agreement on it. Forged hellos cost one signature check and nothing else.
+	if err := handshake.VerifyHello(h.cfg.Identity, pub, hello, now); err != nil {
+		h.hellosRefused.Add(1)
+		h.reject(m, "hello refused")
+		return
+	}
+	h.mu.Lock()
+	tooSoon := now.Sub(st.lastHello) < h.cfg.HelloMinInterval
+	h.mu.Unlock()
+	if tooSoon {
+		h.hellosRefused.Add(1)
+		h.reject(m, "hello rate limit")
+		return
+	}
 	ack, res, err := handshake.Respond(h.cfg.Identity, pub, hello, now, h.guard)
 	if err != nil {
 		h.hellosRefused.Add(1)
@@ -466,14 +568,11 @@ func (h *Hub) onHello(ctx context.Context, m *transport.Message) {
 		return
 	}
 	h.mu.Lock()
-	if now.Sub(st.lastHello) < h.cfg.HelloMinInterval {
-		h.mu.Unlock()
-		h.hellosRefused.Add(1)
-		h.reject(m, "hello rate limit")
-		return
-	}
 	st.lastHello = now
-	st.pending = &sess{sid: res.SessionID, r: ratchet.NewResponder(res.SessionKey, res.OwnRatchetKey)}
+	st.pending = append(st.pending, &sess{sid: res.SessionID, r: ratchet.NewResponder(res.SessionKey, res.OwnRatchetKey)})
+	if len(st.pending) > maxPending {
+		st.pending = st.pending[len(st.pending)-maxPending:]
+	}
 	h.mu.Unlock()
 	data, err := ack.Encode()
 	if err != nil {
@@ -495,8 +594,10 @@ func (h *Hub) find(sid [8]byte) (name string, s *sess, pending bool) {
 		if st.cur != nil && st.cur.sid == sid {
 			return n, st.cur, false
 		}
-		if st.pending != nil && st.pending.sid == sid {
-			return n, st.pending, true
+		for _, p := range st.pending {
+			if p.sid == sid {
+				return n, p, true
+			}
 		}
 	}
 	return "", nil, false
@@ -524,9 +625,16 @@ func (h *Hub) onMsg(ctx context.Context, m *transport.Message) {
 	now := h.cfg.Now()
 	h.mu.Lock()
 	st := h.agents[name]
-	if isPending && st.pending == s { // the new session proved itself: it replaces the old one
-		st.cur, st.pending = s, nil // seen ids are kept: an agent resends unconfirmed messages in the new session
+	promoted := false
+	if isPending { // the new session proved itself: it replaces the old one and the other offers are dead
+		for _, p := range st.pending {
+			if p == s {
+				st.cur, st.pending, promoted = s, nil, true // seen ids are kept: an agent resends unconfirmed messages in the new session
+				break
+			}
+		}
 	}
+	locked := h.locked
 	st.lastSeen = now
 	comeback := st.offlineNotice
 	st.offlineNotice = false
@@ -534,6 +642,11 @@ func (h *Hub) onMsg(ctx context.Context, m *transport.Message) {
 	st.everConnected = true
 	_, dup := st.seenIDs[p.ID]
 	h.mu.Unlock()
+	if promoted && locked {
+		// A lockdown reaches only the sessions that existed when it was ordered. A machine that reconnects later,
+		// for example after the hub restarted, must hear it again.
+		h.sendLockdown(ctx, name, s, now)
+	}
 	if dup {
 		// Already shown. The agent is asking again because it never got the receipt: confirm, do not repeat.
 		if p.Type == wire.TypeReply || p.Type == wire.TypeNotice || p.Type == wire.TypeAlert {
@@ -546,6 +659,7 @@ func (h *Hub) onMsg(ctx context.Context, m *transport.Message) {
 		if comeback || first {
 			h.say(ctx, "✅ "+name+" is connected.")
 		}
+		h.ackHeartbeat(ctx, name, s) // tells the agent the session works, so it stops repeating "ready"
 	case wire.TypeHeartbeat:
 		h.mu.Lock()
 		st.info = p.Meta

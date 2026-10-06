@@ -22,8 +22,7 @@ func TestSendTextIsLiteralAndSeparatedByDoubleDash(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := [][]string{
-		{"send-keys", "-t", "claude", "-l", "--", "-t evil; rm -rf / && $(x)"},
-		{"send-keys", "-t", "claude", "Enter"},
+		{"send-keys", "-t", "claude", "-l", "--", "-t evil; rm -rf / && $(x)", ";", "send-keys", "-t", "claude", "Enter"},
 	}
 	if !reflect.DeepEqual(r.calls, want) {
 		t.Fatalf("calls = %v", r.calls)
@@ -34,7 +33,7 @@ func TestTrailingNewlinesAreTrimmedAndInnerOnesKept(t *testing.T) {
 	r := &recorder{}
 	tm, _ := New("claude", r.run)
 	tm.SendText(context.Background(), "line one\nline two\r\n\n")
-	if r.calls[0][5] != "line one\nline two" {
+	if r.calls[0][5] != "line one\nline two" || len(r.calls) != 1 {
 		t.Fatalf("text sent: %q", r.calls[0][5])
 	}
 }

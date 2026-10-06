@@ -11,8 +11,11 @@ import (
 	"encoding/base32"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +33,7 @@ var (
 	ErrNoSuch    = errors.New("approval: no such challenge")
 	ErrExpired   = errors.New("approval: challenge expired")
 	ErrNotForYou = errors.New("approval: challenge belongs to another command")
+	ErrState     = errors.New("approval: cannot record the use of the code, so it is refused")
 )
 
 // GenerateSecret returns a new random secret and its base32 form for an authenticator app.
@@ -82,6 +86,70 @@ type Verifier struct {
 	lastStep    int64
 	fails       int
 	lockedUntil time.Time
+	path        string // where lastStep and lockedUntil are kept, if anywhere
+}
+
+type verifierState struct {
+	LastStep    int64 `json:"last_step"`
+	LockedUntil int64 `json:"locked_until,omitempty"`
+}
+
+// Persist keeps the verifier's memory of used codes and of a lockout in a file (0600), so that restarting the program
+// does not make a code that was already used, or a lockout that was already earned, disappear. A missing file is a
+// fresh start; a file that cannot be parsed makes the verifier refuse the current and the previous time step, which
+// costs the user at most a minute of waiting. After Persist, a code whose use cannot be recorded is refused.
+func (v *Verifier) Persist(path string, now time.Time) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.path = path
+	data, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil:
+		return err
+	}
+	var st verifierState
+	if json.Unmarshal(data, &st) != nil {
+		v.lastStep = step(now) + 1
+		return nil
+	}
+	v.lastStep = st.LastStep
+	if st.LockedUntil > 0 {
+		v.lockedUntil = time.Unix(st.LockedUntil, 0)
+	}
+	return nil
+}
+
+func (v *Verifier) save() error {
+	if v.path == "" {
+		return nil
+	}
+	st := verifierState{LastStep: v.lastStep}
+	if !v.lockedUntil.IsZero() {
+		st.LockedUntil = v.lockedUntil.Unix()
+	}
+	data, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(v.path), ".tmp-approval-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), v.path)
 }
 
 // NewVerifier returns a verifier with 5 failures allowed and a 5 minute lockout.
@@ -104,7 +172,12 @@ func (v *Verifier) Verify(code string, now time.Time) error {
 			if s <= v.lastStep {
 				return ErrReused
 			}
+			prev := v.lastStep
 			v.lastStep = s
+			if err := v.save(); err != nil {
+				v.lastStep = prev
+				return ErrState
+			}
 			v.fails = 0
 			return nil
 		}
@@ -113,6 +186,7 @@ func (v *Verifier) Verify(code string, now time.Time) error {
 	if v.fails >= v.MaxFails {
 		v.lockedUntil = now.Add(v.Lockout)
 		v.fails = 0
+		v.save() // best effort: the lockout still holds in memory
 		return ErrLocked
 	}
 	return ErrBadCode

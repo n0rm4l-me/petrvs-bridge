@@ -27,6 +27,10 @@ const (
 	KindAck   = "ack"
 	KindMsg   = "msg"
 
+	// MetaSeq is the Meta key under which the hub numbers the commands (text and keys) of one session, from 1. The
+	// agent runs them in that order and reports a gap instead of running a later command first.
+	MetaSeq = "n"
+
 	// MaxBody bounds the text carried in one payload.
 	MaxBody = 256 << 10
 	// MaxData bounds one bus message.

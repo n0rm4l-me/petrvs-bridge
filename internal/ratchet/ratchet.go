@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 const (
@@ -37,6 +38,11 @@ const (
 	PadBucket = 1024
 	// MaxPlaintext is the largest message accepted by Encrypt.
 	MaxPlaintext = 1 << 20
+	// DHStepBurst and DHStepPerSecond are the default budget of new peer keys that Decrypt will try. A new key costs
+	// two Diffie-Hellman operations, a key generation and a copy of the state, and anyone who can publish to the bus
+	// can offer one in every forged packet; a real peer offers one per round trip.
+	DHStepBurst     = 20
+	DHStepPerSecond = 5.0
 
 	keyLen    = 32
 	headerLen = keyLen + 4 + 4 // ratchet public key, previous chain length, message number
@@ -50,6 +56,7 @@ var (
 	ErrTooManySkipped = errors.New("ratchet: too many skipped messages")
 	ErrMalformed      = errors.New("ratchet: malformed message")
 	ErrTooLarge       = errors.New("ratchet: message too large")
+	ErrRateLimited    = errors.New("ratchet: too many new keys offered, slow down")
 )
 
 type skipID struct {
@@ -85,6 +92,60 @@ func (s *state) clone() *state {
 type Ratchet struct {
 	mu sync.Mutex
 	st *state
+
+	// budget of DH steps, a token bucket
+	tokens, burst, rate float64
+	last                time.Time
+	now                 func() time.Time
+}
+
+func newRatchet(s *state) *Ratchet {
+	return &Ratchet{st: s, tokens: DHStepBurst, burst: DHStepBurst, rate: DHStepPerSecond, now: time.Now}
+}
+
+// SetDHStepLimit changes the budget of new peer keys Decrypt will try: a burst, refilled at perSecond. A nil clock
+// means the real one. It exists for tests and for unusual deployments.
+func (r *Ratchet) SetDHStepLimit(burst int, perSecond float64, clock func() time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tokens, r.burst, r.rate = float64(burst), float64(burst), perSecond
+	r.last = time.Time{}
+	if clock == nil {
+		clock = time.Now
+	}
+	r.now = clock
+}
+
+// takeStep spends one token; the caller holds r.mu.
+func (r *Ratchet) takeStep() bool {
+	now := r.now()
+	if !r.last.IsZero() {
+		r.tokens += now.Sub(r.last).Seconds() * r.rate
+		if r.tokens > r.burst {
+			r.tokens = r.burst
+		}
+	}
+	r.last = now
+	if r.tokens < 1 {
+		return false
+	}
+	r.tokens--
+	return true
+}
+
+// wouldStep reports whether blob offers a peer key that is neither the current one nor covered by a stored skipped
+// key, so that decrypting it would start a DH step.
+func (s *state) wouldStep(blob []byte) bool {
+	if len(blob) < headerLen {
+		return false
+	}
+	var id skipID
+	copy(id.dh[:], blob[:keyLen])
+	id.n = binary.BigEndian.Uint32(blob[keyLen+4:])
+	if _, ok := s.skipped[id]; ok {
+		return false
+	}
+	return s.dhr == nil || string(blob[:keyLen]) != string(s.dhr)
 }
 
 var x25519 = ecdh.X25519()
@@ -107,13 +168,13 @@ func NewInitiator(sessionKey [keyLen]byte, peerRatchetPub []byte) (*Ratchet, err
 	s := &state{dhs: dhs, dhr: append([]byte(nil), peerRatchetPub...), skipped: map[skipID][keyLen]byte{}}
 	s.rk, s.cks = kdfRK(sessionKey, dh)
 	s.hasCKs = true
-	return &Ratchet{st: s}, nil
+	return newRatchet(s), nil
 }
 
 // NewResponder starts the party that waits for the first message. ownRatchetKey
 // is the private half of the ratchet public key it gave the initiator.
 func NewResponder(sessionKey [keyLen]byte, ownRatchetKey *ecdh.PrivateKey) *Ratchet {
-	return &Ratchet{st: &state{rk: sessionKey, dhs: ownRatchetKey, skipped: map[skipID][keyLen]byte{}}}
+	return newRatchet(&state{rk: sessionKey, dhs: ownRatchetKey, skipped: map[skipID][keyLen]byte{}})
 }
 
 func kdfRK(rk [keyLen]byte, dh []byte) (newRK, ck [keyLen]byte) {
@@ -205,6 +266,9 @@ func joinAD(header, ad []byte) []byte {
 func (r *Ratchet) Decrypt(blob, ad []byte) ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.st.wouldStep(blob) && !r.takeStep() {
+		return nil, ErrRateLimited
+	}
 	work := r.st.clone()
 	plain, err := work.decrypt(blob, ad)
 	if err != nil {
@@ -389,5 +453,5 @@ func Unmarshal(data []byte) (*Ratchet, error) {
 		s.skipped[id] = mk
 		s.order = append(s.order, id)
 	}
-	return &Ratchet{st: s}, nil
+	return newRatchet(s), nil
 }

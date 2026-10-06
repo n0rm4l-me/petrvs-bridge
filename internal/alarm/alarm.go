@@ -93,10 +93,21 @@ func (a *Alarm) Armed() bool {
 	return a.armed
 }
 
-// Arm turns the alarm on and takes a fresh baseline, so the person who armed it is not reported.
+// Arm turns the alarm on and takes a fresh baseline, so the person who armed it is not reported. Arming an alarm that
+// is already armed changes nothing: in particular it does not retake the baseline, which would hide a touch that
+// happened just before. The state file is written first; if that fails the alarm stays as it was, so what the user is
+// told matches what survives a restart.
 func (a *Alarm) Arm() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.cfg.StateFile != "" {
+		if err := os.WriteFile(a.cfg.StateFile, []byte("armed\n"), 0o600); err != nil {
+			return err
+		}
+	}
+	if a.armed {
+		return nil
+	}
 	a.armed = true
 	a.last, a.suppressed, a.errs = map[string]time.Time{}, map[string]int{}, map[string]error{}
 	for _, s := range a.cfg.Sensors {
@@ -104,22 +115,20 @@ func (a *Alarm) Arm() error {
 			r.Reset()
 		}
 	}
-	if a.cfg.StateFile != "" {
-		return os.WriteFile(a.cfg.StateFile, []byte("armed\n"), 0o600)
-	}
 	return nil
 }
 
-// Disarm turns the alarm off.
+// Disarm turns the alarm off. The state file goes first; if it cannot be removed the alarm stays armed, which is the
+// safe side, and the error says so.
 func (a *Alarm) Disarm() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.armed = false
 	if a.cfg.StateFile != "" {
 		if err := os.Remove(a.cfg.StateFile); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
+	a.armed = false
 	return nil
 }
 

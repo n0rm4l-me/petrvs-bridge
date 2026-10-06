@@ -111,13 +111,29 @@ func (i *Identity) Save(path string) error {
 }
 
 // Load reads a private identity. It refuses a file that other users can read.
-func Load(path string) (*Identity, error) {
+func Load(path string) (*Identity, error) { return LoadOpts(path, false) }
+
+// CheckPrivateMode refuses a secret file that other users can read. With allowGroupRead the owning group may read it
+// (for example a Kubernetes secret volume with fsGroup), but nobody else may, and nobody but the owner may write.
+func CheckPrivateMode(path string, allowGroupRead bool) error {
 	st, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if st.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("identity: %s is readable by other users (mode %v); chmod 600", path, st.Mode().Perm())
+	bad := os.FileMode(0o077)
+	if allowGroupRead {
+		bad = 0o027
+	}
+	if st.Mode().Perm()&bad != 0 {
+		return fmt.Errorf("%s has mode %v, which lets other users in; chmod 600", path, st.Mode().Perm())
+	}
+	return nil
+}
+
+// LoadOpts is Load with the group-read exception of CheckPrivateMode.
+func LoadOpts(path string, allowGroupRead bool) (*Identity, error) {
+	if err := CheckPrivateMode(path, allowGroupRead); err != nil {
+		return nil, fmt.Errorf("identity: %w", err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

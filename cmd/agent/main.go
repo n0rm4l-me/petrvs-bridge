@@ -146,7 +146,7 @@ func serve(args []string, getenv func(string) string) int {
 		return code
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level(cfg.LogLevel)}))
-	id, err := identity.Load(cfg.Identity)
+	id, err := identity.LoadOpts(cfg.Identity, cfg.AllowGroupRead)
 	if err != nil {
 		log.Error("cannot load the identity", "err", err)
 		return 1
@@ -166,6 +166,16 @@ func serve(args []string, getenv func(string) string) int {
 	ex, err := tmuxctl.New(cfg.TmuxSession, nil)
 	if err != nil {
 		log.Error("invalid tmux session name", "err", err)
+		return 1
+	}
+	// Everything the agent keeps (spool, lock, alarm state, used codes) is private to its user.
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err == nil {
+		err = os.Chmod(cfg.StateDir, 0o700)
+		if err != nil {
+			log.Warn("cannot restrict the state directory to its owner", "dir", cfg.StateDir, "err", err)
+		}
+	} else {
+		log.Error("cannot create the state directory", "dir", cfg.StateDir, "err", err)
 		return 1
 	}
 	sp, err := spool.Open(cfg.SpoolDir)
@@ -201,7 +211,8 @@ func serve(args []string, getenv func(string) string) int {
 	acfg := agentsvc.Config{
 		Identity: id, Hub: hub, Transport: tr, Names: names, Exec: ex, Spool: sp, LockFile: cfg.LockFile, Log: log,
 		HeartbeatEvery: cfg.Heartbeat, HandshakeEvery: cfg.Handshake, SilenceLimit: cfg.Silence, ReceiptTimeout: cfg.ReceiptTimeout,
-		Info: func() map[string]string { return map[string]string{"host": host, "os": runtime.GOOS} },
+		ReorderWindow: cfg.ReorderWindow,
+		Info:          func() map[string]string { return map[string]string{"host": host, "os": runtime.GOOS} },
 	}
 	if cfg.AlarmEnabled {
 		if sensors := alarm.DefaultSensors(); len(sensors) > 0 {
@@ -212,7 +223,14 @@ func serve(args []string, getenv func(string) string) int {
 			}
 			acfg.Alarm = al
 			if cfg.AlarmSecret != nil {
-				acfg.AlarmCode = approval.NewVerifier(cfg.AlarmSecret)
+				v := approval.NewVerifier(cfg.AlarmSecret)
+				if err := v.Persist(cfg.AlarmCodeState, time.Now()); err != nil {
+					log.Error("cannot read the record of used alarm codes", "err", err)
+					return 1
+				}
+				acfg.AlarmCode = v
+			} else {
+				log.Warn("no CB_ALARM_SECRET_FILE: anyone who controls the chat can disarm the alarm")
 			}
 			log.Info("alarm available", "armed", al.Armed(), "code_to_disarm", cfg.AlarmSecret != nil)
 		} else {

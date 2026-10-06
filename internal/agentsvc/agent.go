@@ -12,8 +12,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,11 +65,17 @@ type Config struct {
 	AlarmCode *approval.Verifier
 	// ReceiptTimeout is how long a spooled message waits for the hub's receipt before it is sent again.
 	ReceiptTimeout time.Duration // default 30s
+	// ReorderWindow is how long a command waits for an earlier one that has not arrived yet. The bus does not keep
+	// order, the hub numbers the commands, and the agent runs them in that order; when the earlier one has not come
+	// after this long it is reported as lost and the later ones go ahead.
+	ReorderWindow time.Duration // default 2s
 }
 
 // Stats counts what the agent has seen; the counters never include message content.
 type Stats struct {
 	Handshakes, Executed, Rejected, Duplicates, Expired, Refused uint64
+	// Lost counts commands that never arrived in order; Late counts ones that arrived after their turn had passed.
+	Lost, Late uint64
 }
 
 type session struct {
@@ -93,12 +102,22 @@ type Agent struct {
 	sess     *session
 	pending  map[string]pendingHello
 	lastHub  time.Time // last authenticated message from the hub
-	locked   bool
+	heard    bool      // the hub has answered in the current session
 	seenIDs  map[string]struct{}
 	seenRing []string
 	awaiting map[string]awaitingReceipt // payload id -> spool file
 
-	handshakes, executed, rejected, duplicates, expired, refused atomic.Uint64
+	// locked is sticky in memory. lockOnDisk says the lock file was written, so that removing it on this machine is
+	// what unlocks; a lock that could not be written stays until the agent restarts.
+	locked, lockOnDisk bool
+
+	// Commands are run one at a time, in the hub's order.
+	cmdNext  uint64
+	cmdQ     map[uint64]*wire.Payload
+	gapSince time.Time
+	cmdWake  chan struct{}
+
+	handshakes, executed, rejected, duplicates, expired, refused, lost, late atomic.Uint64
 }
 
 // New validates the configuration and returns an agent.
@@ -129,12 +148,14 @@ func New(cfg Config) (*Agent, error) {
 	def(&cfg.SpoolEvery, 2*time.Second)
 	def(&cfg.SkewAllowance, 30*time.Second)
 	def(&cfg.ReceiptTimeout, 30*time.Second)
-	return &Agent{cfg: cfg, log: cfg.Log.With("agent", cfg.Identity.Name), pending: map[string]pendingHello{}, seenIDs: map[string]struct{}{}, awaiting: map[string]awaitingReceipt{}}, nil
+	def(&cfg.ReorderWindow, 2*time.Second)
+	return &Agent{cfg: cfg, log: cfg.Log.With("agent", cfg.Identity.Name), pending: map[string]pendingHello{}, seenIDs: map[string]struct{}{},
+		awaiting: map[string]awaitingReceipt{}, cmdNext: 1, cmdQ: map[uint64]*wire.Payload{}, cmdWake: make(chan struct{}, 1)}, nil
 }
 
 // Stats returns the counters.
 func (a *Agent) Stats() Stats {
-	return Stats{a.handshakes.Load(), a.executed.Load(), a.rejected.Load(), a.duplicates.Load(), a.expired.Load(), a.refused.Load()}
+	return Stats{a.handshakes.Load(), a.executed.Load(), a.rejected.Load(), a.duplicates.Load(), a.expired.Load(), a.refused.Load(), a.lost.Load(), a.late.Load()}
 }
 
 // Connected reports whether a session is established and the hub answered recently.
@@ -151,11 +172,23 @@ func (a *Agent) Locked() bool {
 	return a.lockedLocked()
 }
 
+// lockedLocked answers whether text and keys are refused; the caller holds a.mu. It fails closed: a lock file that
+// exists, or that cannot be checked, means locked. Only removing the file on this machine unlocks, and only a lock
+// that was written to the file can be removed that way.
 func (a *Agent) lockedLocked() bool {
-	if a.cfg.LockFile != "" {
-		_, err := os.Stat(a.cfg.LockFile)
-		a.locked = err == nil // deleting the file on this machine is the unlock
+	if a.cfg.LockFile == "" {
 		return a.locked
+	}
+	_, err := os.Stat(a.cfg.LockFile)
+	switch {
+	case err == nil:
+		a.locked, a.lockOnDisk = true, true
+	case errors.Is(err, fs.ErrNotExist):
+		if a.lockOnDisk {
+			a.locked, a.lockOnDisk = false, false
+		}
+	default:
+		a.locked = true // cannot tell, so stay safe
 	}
 	return a.locked
 }
@@ -173,6 +206,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go func() { errc <- a.cfg.Transport.Receive(ctx, a.cfg.Names.AgentSub(a.cfg.Identity.Name), a.handle) }()
 	go a.loop(ctx, a.cfg.HandshakeEvery, true, a.handshakeTick)
 	go a.loop(ctx, a.cfg.HeartbeatEvery, false, a.heartbeatTick)
+	go a.executor(ctx)
 	if a.cfg.Spool != nil {
 		go a.loop(ctx, a.cfg.SpoolEvery, false, a.spoolTick)
 	}
@@ -207,7 +241,14 @@ func (a *Agent) loop(ctx context.Context, every time.Duration, immediately bool,
 func (a *Agent) handshakeTick(ctx context.Context) {
 	a.mu.Lock()
 	need := a.sess == nil || a.cfg.Now().Sub(a.lastHub) >= a.cfg.SilenceLimit
+	unanswered := a.sess != nil && !a.heard
 	a.mu.Unlock()
+	if unanswered && !need {
+		// The hub starts using the new session when it hears from it. If the first message got lost it would wait
+		// for the next heartbeat; say it again instead.
+		a.send(ctx, &wire.Payload{Type: wire.TypeReady})
+		return
+	}
 	if !need {
 		return
 	}
@@ -377,8 +418,9 @@ func (a *Agent) onAck(ctx context.Context, m *transport.Message) {
 	}
 	a.mu.Lock()
 	a.sess = &session{sid: res.SessionID, r: r}
-	a.lastHub = now
+	a.lastHub, a.heard = now, false
 	a.pending = map[string]pendingHello{}
+	a.cmdNext, a.cmdQ, a.gapSince = 1, map[uint64]*wire.Payload{}, time.Time{} // the hub numbers commands per session
 	a.seenIDs, a.seenRing = map[string]struct{}{}, nil
 	a.awaiting = map[string]awaitingReceipt{} // everything unconfirmed is sent again in the new session
 	a.mu.Unlock()
@@ -408,7 +450,7 @@ func (a *Agent) onMsg(ctx context.Context, m *transport.Message) {
 	}
 	now := a.cfg.Now()
 	a.mu.Lock()
-	a.lastHub = now
+	a.lastHub, a.heard = now, true
 	dup := a.remember(p.ID)
 	a.mu.Unlock()
 	m.Ack()
@@ -430,7 +472,7 @@ func (a *Agent) onMsg(ctx context.Context, m *transport.Message) {
 			a.cfg.Spool.Remove(w.file)
 		}
 	case wire.TypeLockdown:
-		a.lock()
+		a.lock(ctx)
 	case wire.TypeAlarm:
 		if p.Expired(now, a.cfg.SkewAllowance) {
 			a.expired.Add(1)
@@ -439,18 +481,116 @@ func (a *Agent) onMsg(ctx context.Context, m *transport.Message) {
 		}
 		a.alarmCommand(ctx, p.Body)
 	case wire.TypeText, wire.TypeKey:
-		if p.Expired(now, a.cfg.SkewAllowance) {
-			a.expired.Add(1)
-			a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "expired before it arrived, not executed"})
-			return
-		}
-		if a.Locked() {
-			a.refused.Add(1)
-			a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "refused: this machine is locked"})
-			return
-		}
-		a.execute(ctx, p)
+		a.enqueue(ctx, s, p)
 	}
+}
+
+// enqueue puts a command in its place in the hub's order. The bus may deliver out of order and the receive callbacks
+// run concurrently, so nothing is run from here: the executor runs the queue, one command at a time.
+func (a *Agent) enqueue(ctx context.Context, s *session, p *wire.Payload) {
+	n, err := strconv.ParseUint(p.Meta[wire.MetaSeq], 10, 64)
+	if err != nil || n == 0 {
+		a.refused.Add(1)
+		a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "refused: a command without a sequence number"})
+		return
+	}
+	const window = 1000 // numbers ahead of the next one that are believed
+	a.mu.Lock()
+	switch {
+	case a.sess != s:
+		a.mu.Unlock() // the session was replaced meanwhile; the command belongs to a session that no longer exists
+		return
+	case n < a.cmdNext:
+		a.mu.Unlock()
+		a.late.Add(1)
+		a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: fmt.Sprintf("command #%d arrived after its turn had passed, not executed", n)})
+		return
+	case n-a.cmdNext > window || len(a.cmdQ) >= 256:
+		a.mu.Unlock()
+		a.refused.Add(1)
+		a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "refused: too many commands waiting"})
+		return
+	}
+	a.cmdQ[n] = p
+	a.mu.Unlock()
+	select {
+	case a.cmdWake <- struct{}{}:
+	default:
+	}
+}
+
+// executor runs queued commands in order until ctx ends.
+func (a *Agent) executor(ctx context.Context) {
+	every := a.cfg.ReorderWindow / 4
+	if every < 5*time.Millisecond {
+		every = 5 * time.Millisecond
+	} else if every > 250*time.Millisecond {
+		every = 250 * time.Millisecond
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		a.runQueue(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-a.cmdWake:
+		case <-t.C:
+		}
+	}
+}
+
+// runQueue runs every command that is next in line. If the next number is missing while later ones wait, it gives the
+// missing one ReorderWindow to turn up, and then reports it lost and goes on. The window is real time, not the
+// configured clock: it measures how long this process has waited.
+func (a *Agent) runQueue(ctx context.Context) {
+	for ctx.Err() == nil {
+		a.mu.Lock()
+		p, ok := a.cmdQ[a.cmdNext]
+		var missing uint64
+		switch {
+		case ok:
+			delete(a.cmdQ, a.cmdNext)
+			a.cmdNext++
+			a.gapSince = time.Time{}
+		case len(a.cmdQ) == 0:
+			a.gapSince = time.Time{}
+			a.mu.Unlock()
+			return
+		default:
+			if a.gapSince.IsZero() {
+				a.gapSince = time.Now()
+			}
+			if time.Since(a.gapSince) < a.cfg.ReorderWindow {
+				a.mu.Unlock()
+				return
+			}
+			missing = a.cmdNext
+			a.cmdNext++ // later gaps are skipped at once: this wait already counted for them
+		}
+		a.mu.Unlock()
+		if missing != 0 {
+			a.lost.Add(1)
+			a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: fmt.Sprintf("command #%d did not arrive in time (lost or very late), not executed", missing)})
+			continue
+		}
+		a.runCommand(ctx, p)
+	}
+}
+
+// runCommand applies the expiry and lock rules at the moment a command is about to run, not when it arrived.
+func (a *Agent) runCommand(ctx context.Context, p *wire.Payload) {
+	if p.Expired(a.cfg.Now(), a.cfg.SkewAllowance) {
+		a.expired.Add(1)
+		a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "expired before it could run, not executed"})
+		return
+	}
+	if a.Locked() {
+		a.refused.Add(1)
+		a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "refused: this machine is locked"})
+		return
+	}
+	a.execute(ctx, p)
 }
 
 // remember records an id and reports whether it was already there. The set is bounded.
@@ -467,14 +607,33 @@ func (a *Agent) remember(id string) bool {
 	return false
 }
 
-func (a *Agent) lock() {
+// lock refuses text and keys from now on. The lock is kept in memory first, so it holds even if nothing can be
+// written; the lock file makes it survive a restart and is what `agent unlock` removes. The hub is told which of the
+// two it got.
+func (a *Agent) lock(ctx context.Context) {
 	a.mu.Lock()
 	a.locked = true
 	a.mu.Unlock()
+	var werr error
 	if a.cfg.LockFile != "" {
-		os.WriteFile(a.cfg.LockFile, []byte("locked by hub request\n"), 0o600)
+		if werr = os.MkdirAll(filepath.Dir(a.cfg.LockFile), 0o700); werr == nil {
+			werr = os.WriteFile(a.cfg.LockFile, []byte("locked by hub request\n"), 0o600)
+		}
 	}
-	a.log.Warn("locked by the hub: text and keys are refused until unlocked on this machine")
+	a.mu.Lock()
+	a.lockOnDisk = a.cfg.LockFile != "" && werr == nil
+	a.mu.Unlock()
+	switch {
+	case a.cfg.LockFile == "":
+		a.log.Warn("locked by the hub (in memory only: no lock file is configured)")
+		a.send(ctx, &wire.Payload{Type: wire.TypeNotice, Body: "🔒 Locked, in memory only: no lock file is configured, so a restart of the agent unlocks it."})
+	case werr != nil:
+		a.log.Error("locked by the hub, but the lock file could not be written", "err", werr)
+		a.send(ctx, &wire.Payload{Type: wire.TypeNotice, Body: "🔒 Locked, in memory only: the lock file could not be written, so it holds until the agent restarts, and `agent unlock` cannot lift it before."})
+	default:
+		a.log.Warn("locked by the hub: text and keys are refused until unlocked on this machine")
+		a.send(ctx, &wire.Payload{Type: wire.TypeNotice, Body: "🔒 Locked: text and keys are refused until `agent unlock` is run on this machine."})
+	}
 }
 
 func (a *Agent) execute(ctx context.Context, p *wire.Payload) {
@@ -511,6 +670,15 @@ func (a *Agent) alert(ctx context.Context, e alarm.Event, held int) {
 	a.send(ctx, &wire.Payload{Type: wire.TypeAlert, Body: body, Meta: map[string]string{"sensor": e.Sensor}})
 }
 
+// alarmStatus is the alarm's status plus, when no code protects disarming, the reminder that the chat alone decides.
+func (a *Agent) alarmStatus() string {
+	s := a.cfg.Alarm.Status()
+	if a.cfg.AlarmCode == nil {
+		s += ". No disarm code is set (CB_ALARM_SECRET_FILE): anyone who controls the chat can turn the alarm off"
+	}
+	return s
+}
+
 func (a *Agent) alarmCommand(ctx context.Context, body string) {
 	if a.cfg.Alarm == nil {
 		a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "this machine has no alarm configured"})
@@ -519,11 +687,16 @@ func (a *Agent) alarmCommand(ctx context.Context, body string) {
 	cmd, arg, _ := strings.Cut(strings.TrimSpace(body), " ")
 	switch cmd {
 	case "on":
+		already := a.cfg.Alarm.Armed()
 		if err := a.cfg.Alarm.Arm(); err != nil {
-			a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "could not arm the alarm"})
+			a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "could not arm the alarm: the state file could not be written"})
 			return
 		}
-		a.send(ctx, &wire.Payload{Type: wire.TypeNotice, Body: "🚨 Alarm armed. Any touch of this machine will be reported. " + a.cfg.Alarm.Status()})
+		head := "🚨 Alarm armed. Any touch of this machine will be reported. "
+		if already {
+			head = "🚨 The alarm was already armed, nothing changed. "
+		}
+		a.send(ctx, &wire.Payload{Type: wire.TypeNotice, Body: head + a.alarmStatus()})
 	case "off":
 		if a.Locked() {
 			a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "refused: this machine is locked, so the alarm stays armed"})
@@ -537,12 +710,12 @@ func (a *Agent) alarmCommand(ctx context.Context, body string) {
 			}
 		}
 		if err := a.cfg.Alarm.Disarm(); err != nil {
-			a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "could not disarm the alarm"})
+			a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "could not disarm the alarm: the state file could not be removed, so it stays armed"})
 			return
 		}
 		a.send(ctx, &wire.Payload{Type: wire.TypeNotice, Body: "Alarm disarmed."})
 	case "status", "":
-		a.send(ctx, &wire.Payload{Type: wire.TypeNotice, Body: a.cfg.Alarm.Status()})
+		a.send(ctx, &wire.Payload{Type: wire.TypeNotice, Body: a.alarmStatus()})
 	default:
 		a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "unknown alarm command; use on, off or status"})
 	}

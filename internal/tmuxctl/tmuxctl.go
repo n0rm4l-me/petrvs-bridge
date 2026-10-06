@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 )
@@ -45,6 +46,7 @@ func ExecRunner(ctx context.Context, args ...string) error {
 type Tmux struct {
 	session string
 	run     Runner
+	mu      sync.Mutex // one command at a time: two senders must not interleave their keystrokes
 }
 
 // New returns a controller for the session; run may be nil to use the real tmux.
@@ -80,10 +82,19 @@ func (t *Tmux) SendText(ctx context.Context, text string) error {
 	if err := ValidateText(text); err != nil {
 		return err
 	}
-	if err := t.run(ctx, "send-keys", "-t", t.session, "-l", "--", text); err != nil {
-		return err
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	// Text and Enter go in one tmux invocation, joined by a lone ";" argument, so nothing can slip in between.
+	return t.run(ctx, "send-keys", "-t", t.session, "-l", "--", escapeTrailingSemicolon(text), ";", "send-keys", "-t", t.session, "Enter")
+}
+
+// escapeTrailingSemicolon stops tmux from reading a final ";" of the text as a command separator: tmux turns an
+// argument ending in "\;" into one ending in ";", and drops a bare trailing ";" as a separator.
+func escapeTrailingSemicolon(s string) string {
+	if strings.HasSuffix(s, ";") {
+		return s[:len(s)-1] + `\;`
 	}
-	return t.run(ctx, "send-keys", "-t", t.session, "Enter")
+	return s
 }
 
 // SendKey presses one allowed key.
@@ -92,5 +103,7 @@ func (t *Tmux) SendKey(ctx context.Context, key string) error {
 	if !ok {
 		return ErrKey
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	return t.run(ctx, "send-keys", "-t", t.session, name)
 }
