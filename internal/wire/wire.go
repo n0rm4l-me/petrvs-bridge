@@ -42,6 +42,7 @@ const (
 	TypeKey      Type = "key"      // one key: Enter, Escape, Up, Down, 1..9
 	TypeLockdown Type = "lockdown" // stop acting on text and keys until unlocked locally
 	TypePing     Type = "ping"
+	TypeHBAck    Type = "hback" // the hub saw the heartbeat
 	// agent to hub
 	TypeReady     Type = "ready"   // first message of a session
 	TypeReply     Type = "reply"   // output to show the user
@@ -52,7 +53,7 @@ const (
 )
 
 var (
-	toAgent = map[Type]bool{TypeText: true, TypeKey: true, TypeLockdown: true, TypePing: true}
+	toAgent = map[Type]bool{TypeText: true, TypeKey: true, TypeLockdown: true, TypePing: true, TypeHBAck: true}
 	toHub   = map[Type]bool{TypeReady: true, TypeReply: true, TypeNotice: true, TypeHeartbeat: true, TypeDropped: true, TypePong: true}
 )
 
