@@ -43,6 +43,7 @@ const (
 	TypeLockdown Type = "lockdown" // stop acting on text and keys until unlocked locally
 	TypePing     Type = "ping"
 	TypeHBAck    Type = "hback" // the hub saw the heartbeat
+	TypeReceipt  Type = "rcpt"  // the hub took a reply or notice; Body is the payload id
 	// agent to hub
 	TypeReady     Type = "ready"   // first message of a session
 	TypeReply     Type = "reply"   // output to show the user
@@ -53,7 +54,7 @@ const (
 )
 
 var (
-	toAgent = map[Type]bool{TypeText: true, TypeKey: true, TypeLockdown: true, TypePing: true, TypeHBAck: true}
+	toAgent = map[Type]bool{TypeText: true, TypeKey: true, TypeLockdown: true, TypePing: true, TypeHBAck: true, TypeReceipt: true}
 	toHub   = map[Type]bool{TypeReady: true, TypeReply: true, TypeNotice: true, TypeHeartbeat: true, TypeDropped: true, TypePong: true}
 )
 
@@ -165,3 +166,21 @@ func Open(r *ratchet.Ratchet, from, to string, sid [8]byte, data []byte, toHubDi
 	}
 	return &p, nil
 }
+
+// Names builds the topic and subscription names for a deployment.
+type Names struct{ Prefix string }
+
+// DefaultNames uses the prefix "cb".
+func DefaultNames() Names { return Names{Prefix: "cb"} }
+
+// ToHub is the topic every agent publishes to.
+func (n Names) ToHub() string { return n.Prefix + "-to-hub" }
+
+// HubSub is the hub's subscription on ToHub.
+func (n Names) HubSub() string { return n.Prefix + "-hub" }
+
+// ToAgent is the topic the hub publishes to for one agent.
+func (n Names) ToAgent(agent string) string { return n.Prefix + "-to-agent-" + agent }
+
+// AgentSub is one agent's subscription on its own topic.
+func (n Names) AgentSub(agent string) string { return n.Prefix + "-agent-" + agent }

@@ -96,6 +96,47 @@ func (s *Spool) Add(t wire.Type, body string) error {
 	return os.Rename(tmp.Name(), filepath.Join(s.dir, fmt.Sprintf("%020d-%d.json", time.Now().UnixNano(), os.Getpid())))
 }
 
+// Entry is a queued message with the name of its file.
+type Entry struct {
+	Name string
+	Item Item
+}
+
+// List returns the queued messages oldest first without removing them. Unreadable files are set aside.
+func (s *Spool) List() ([]Entry, error) {
+	names, err := s.files()
+	if err != nil {
+		return nil, err
+	}
+	var out []Entry
+	for _, n := range names {
+		path := filepath.Join(s.dir, n)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var it Item
+		if json.Unmarshal(data, &it) != nil || (it.Type != wire.TypeReply && it.Type != wire.TypeNotice) {
+			os.Rename(path, path+".bad")
+			continue
+		}
+		out = append(out, Entry{Name: n, Item: it})
+	}
+	return out, nil
+}
+
+// Remove deletes a queued message once its delivery is confirmed.
+func (s *Spool) Remove(name string) error {
+	if name != filepath.Base(name) || !strings.HasSuffix(name, ".json") {
+		return errors.New("spool: bad name")
+	}
+	err := os.Remove(filepath.Join(s.dir, name))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
 // Len is the number of queued messages.
 func (s *Spool) Len() int {
 	names, _ := s.files()

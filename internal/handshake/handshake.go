@@ -205,6 +205,12 @@ func NewInitiator(id *identity.Identity, peer identity.Public, now time.Time) (*
 	return &Initiator{id: id, peer: peer, eph: eph, dk: dk, hello: m}, m, nil
 }
 
+// ID identifies this handshake: the value an ack carries in Ref.
+func (i *Initiator) ID() string { return string(i.hello.digest()) }
+
+// AckRef returns the handshake id an ack answers.
+func (m *Message) AckRef() string { return string(m.Ref) }
+
 // Complete verifies the ack and derives the session.
 func (i *Initiator) Complete(ack *Message, now time.Time) (*Result, error) {
 	if err := ack.verify(KindAck, i.id.Name, i.peer, now); err != nil {

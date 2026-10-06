@@ -200,7 +200,7 @@ type Fake struct {
 	queue   []Update
 	sent    []Sent
 	wake    chan struct{}
-	SendErr error
+	sendErr error
 }
 
 // NewFake returns an empty fake.
@@ -243,12 +243,19 @@ func (f *Fake) GetUpdates(ctx context.Context, offset int64, timeout time.Durati
 	}
 }
 
+// SetSendErr makes every Send fail with err until it is set to nil.
+func (f *Fake) SetSendErr(err error) {
+	f.mu.Lock()
+	f.sendErr = err
+	f.mu.Unlock()
+}
+
 // Send records a message.
 func (f *Fake) Send(_ context.Context, chatID int64, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.SendErr != nil {
-		return f.SendErr
+	if f.sendErr != nil {
+		return f.sendErr
 	}
 	f.sent = append(f.sent, Sent{chatID, text})
 	return nil

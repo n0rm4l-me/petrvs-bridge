@@ -1,0 +1,354 @@
+// Package testrig builds a hub, agents, a bus, a fake chat and a fake tmux for
+// end-to-end tests. It is used by tests only.
+package testrig
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"claudebridge/internal/agentsvc"
+	"claudebridge/internal/hubsvc"
+	"claudebridge/internal/identity"
+	"claudebridge/internal/spool"
+	"claudebridge/internal/telegram"
+	"claudebridge/internal/transport"
+	"claudebridge/internal/wire"
+)
+
+const (
+	ChatID = 1001
+	UserID = 2002
+)
+
+// Clock is a clock tests can move.
+type Clock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+// NewClock starts at the current time.
+func NewClock() *Clock { return &Clock{t: time.Now()} }
+
+// Now returns the clock's time.
+func (c *Clock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+
+// Advance moves the clock forward.
+func (c *Clock) Advance(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
+
+// Exec is a fake tmux that records what was typed.
+type Exec struct {
+	mu    sync.Mutex
+	texts []string
+	keys  []string
+	Err   error
+}
+
+func (e *Exec) SendText(_ context.Context, text string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.Err != nil {
+		return e.Err
+	}
+	e.texts = append(e.texts, text)
+	return nil
+}
+
+func (e *Exec) SendKey(_ context.Context, key string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.Err != nil {
+		return e.Err
+	}
+	e.keys = append(e.keys, key)
+	return nil
+}
+
+// Texts returns the texts typed so far.
+func (e *Exec) Texts() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.texts...)
+}
+
+// Keys returns the keys pressed so far.
+func (e *Exec) Keys() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.keys...)
+}
+
+// Options tune a rig.
+type Options struct {
+	Agents    []string // default: one agent named "laptop"
+	Transport transport.Transport
+	// Prefix names the topics; required when Transport is shared, defaults to "cb".
+	Prefix string
+	// Clock, if set, is used by the hub and every agent.
+	Clock *Clock
+	// SilenceLimit overrides the agents' silence limit (useful when the clock is moved).
+	SilenceLimit time.Duration
+	// OfflineAfter overrides the hub's offline threshold.
+	OfflineAfter time.Duration
+	// Slow uses relaxed timings for a bus with real latency.
+	Slow bool
+}
+
+// AgentRig is one agent and its surroundings.
+type AgentRig struct {
+	ID       *identity.Identity
+	Agent    *agentsvc.Agent
+	Exec     *Exec
+	Spool    *spool.Spool
+	LockFile string
+	cfg      agentsvc.Config
+	cancel   context.CancelFunc
+	done     chan struct{}
+}
+
+// Rig is a complete system under test.
+type Rig struct {
+	T      *testing.T
+	Bus    transport.Transport
+	Mem    *transport.Mem
+	TG     *telegram.Fake
+	Names  wire.Names
+	HubID  *identity.Identity
+	Hub    *hubsvc.Hub
+	Agents map[string]*AgentRig
+	Clock  *Clock
+
+	hubCfg hubsvc.Config
+	cancel context.CancelFunc
+	done   chan struct{}
+	mult   time.Duration
+}
+
+func quietLog() *slog.Logger {
+	if os.Getenv("CB_TEST_LOG") != "" {
+		return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
+	return slog.New(slog.NewTextHandler(discard{}, nil))
+}
+
+type discard struct{}
+
+func (discard) Write(p []byte) (int, error) { return len(p), nil }
+
+// New builds a rig without starting anything.
+func New(t *testing.T, o Options) *Rig {
+	t.Helper()
+	if len(o.Agents) == 0 {
+		o.Agents = []string{"laptop"}
+	}
+	r := &Rig{T: t, TG: telegram.NewFake(), Agents: map[string]*AgentRig{}, Clock: o.Clock, mult: 1}
+	if o.Slow {
+		r.mult = 4
+	}
+	r.Names = wire.Names{Prefix: o.Prefix}
+	if r.Names.Prefix == "" {
+		r.Names.Prefix = "cb"
+	}
+	var err error
+	if r.HubID, err = identity.Generate("hub"); err != nil {
+		t.Fatal(err)
+	}
+	if o.Transport != nil {
+		r.Bus = o.Transport
+	} else {
+		r.Mem = transport.NewMem()
+		r.Bus = r.Mem
+		r.Mem.Bind(r.Names.ToHub(), r.Names.HubSub())
+	}
+	var pubs []identity.Public
+	for _, name := range o.Agents {
+		id, err := identity.Generate(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pubs = append(pubs, id.Public())
+		if r.Mem != nil {
+			r.Mem.Bind(r.Names.ToAgent(name), r.Names.AgentSub(name))
+		}
+		sp, err := spool.Open(filepath.Join(t.TempDir(), "spool-"+name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ar := &AgentRig{ID: id, Exec: &Exec{}, Spool: sp, LockFile: filepath.Join(t.TempDir(), "lock-"+name)}
+		m := r.mult
+		ar.cfg = agentsvc.Config{
+			Identity: id, Hub: r.HubID.Public(), Transport: r.Bus, Names: r.Names, Exec: ar.Exec, Spool: sp, LockFile: ar.LockFile,
+			Log: quietLog(), HeartbeatEvery: 100 * time.Millisecond * m, HandshakeEvery: 150 * time.Millisecond * m,
+			SilenceLimit: 600 * time.Millisecond * m, SpoolEvery: 40 * time.Millisecond * m, ReceiptTimeout: 300 * time.Millisecond * m,
+		}
+		if o.SilenceLimit > 0 {
+			ar.cfg.SilenceLimit = o.SilenceLimit
+		}
+		if r.Clock != nil {
+			ar.cfg.Now = r.Clock.Now
+		}
+		r.Agents[name] = ar
+	}
+	r.hubCfg = hubsvc.Config{
+		Identity: r.HubID, Agents: pubs, Transport: r.Bus, Names: r.Names, Telegram: r.TG, ChatID: ChatID, UserID: UserID, Log: quietLog(),
+		OfflineAfter: 500 * time.Millisecond * r.mult, WatchEvery: 40 * time.Millisecond * r.mult, HelloMinInterval: 20 * time.Millisecond,
+		PollTimeout: 150 * time.Millisecond,
+	}
+	if o.OfflineAfter > 0 {
+		r.hubCfg.OfflineAfter = o.OfflineAfter
+	}
+	if r.Clock != nil {
+		r.hubCfg.Now = r.Clock.Now
+	}
+	t.Cleanup(r.StopAll)
+	return r
+}
+
+// StartHub starts (or restarts, with fresh in-memory state) the hub.
+func (r *Rig) StartHub() {
+	r.T.Helper()
+	r.StopHub()
+	h, err := hubsvc.New(r.hubCfg)
+	if err != nil {
+		r.T.Fatal(err)
+	}
+	r.Hub = h
+	ctx, cancel := context.WithCancel(context.Background())
+	r.cancel, r.done = cancel, make(chan struct{})
+	go func() { h.Run(ctx); close(r.done) }()
+}
+
+// StopHub stops the hub and waits for it.
+func (r *Rig) StopHub() {
+	if r.cancel != nil {
+		r.cancel()
+		<-r.done
+		r.cancel = nil
+	}
+}
+
+// StartAgent starts (or restarts, with fresh in-memory state) an agent.
+func (r *Rig) StartAgent(name string) {
+	r.T.Helper()
+	r.StopAgent(name)
+	ar := r.Agents[name]
+	a, err := agentsvc.New(ar.cfg)
+	if err != nil {
+		r.T.Fatal(err)
+	}
+	ar.Agent = a
+	ctx, cancel := context.WithCancel(context.Background())
+	ar.cancel, ar.done = cancel, make(chan struct{})
+	go func() { a.Run(ctx); close(ar.done) }()
+}
+
+// StopAgent stops an agent and waits for it.
+func (r *Rig) StopAgent(name string) {
+	if ar := r.Agents[name]; ar != nil && ar.cancel != nil {
+		ar.cancel()
+		<-ar.done
+		ar.cancel = nil
+	}
+}
+
+// StopAll stops everything.
+func (r *Rig) StopAll() {
+	for n := range r.Agents {
+		r.StopAgent(n)
+	}
+	r.StopHub()
+}
+
+// StartAll starts the hub and every agent and waits until all are connected.
+func (r *Rig) StartAll() {
+	r.T.Helper()
+	r.StartHub()
+	for n := range r.Agents {
+		r.StartAgent(n)
+	}
+	for n := range r.Agents {
+		r.WaitConnected(n)
+	}
+}
+
+// Timeout is how long Eventually waits.
+func (r *Rig) Timeout() time.Duration { return 6 * time.Second * r.mult }
+
+// Eventually polls cond until it is true or the timeout passes.
+func (r *Rig) Eventually(what string, cond func() bool) {
+	r.T.Helper()
+	deadline := time.Now().Add(r.Timeout())
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.T.Fatalf("timed out waiting for: %s\nchat so far: %q", what, r.SentTexts())
+}
+
+// Never asserts that cond stays false for the given time.
+func (r *Rig) Never(what string, d time.Duration, cond func() bool) {
+	r.T.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			r.T.Fatalf("this must not happen: %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// WaitConnected waits until the hub and the agent both consider the session up.
+func (r *Rig) WaitConnected(name string) {
+	r.T.Helper()
+	r.Eventually(name+" to connect", func() bool { return r.Agents[name].Agent.Connected() && r.Hub.Online(name) })
+}
+
+// Say types a message as the authorised user.
+func (r *Rig) Say(text string) {
+	r.TG.Push(telegram.Update{ID: nextID(), ChatID: ChatID, UserID: UserID, Text: text})
+}
+
+// SayAs types a message as someone else.
+func (r *Rig) SayAs(chat, user int64, text string) {
+	r.TG.Push(telegram.Update{ID: nextID(), ChatID: chat, UserID: user, Text: text})
+}
+
+var (
+	idMu sync.Mutex
+	idN  int64
+)
+
+func nextID() int64 { idMu.Lock(); defer idMu.Unlock(); idN++; return idN }
+
+// SentTexts returns what the hub has written to the chat.
+func (r *Rig) SentTexts() []string {
+	var out []string
+	for _, s := range r.TG.Sent() {
+		out = append(out, s.Text)
+	}
+	return out
+}
+
+// Sent reports whether some message to the chat contains the substring.
+func (r *Rig) Sent(sub string) bool {
+	for _, s := range r.SentTexts() {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// WaitSent waits for a chat message containing the substring.
+func (r *Rig) WaitSent(sub string) {
+	r.T.Helper()
+	r.Eventually(fmt.Sprintf("a chat message containing %q", sub), func() bool { return r.Sent(sub) })
+}
