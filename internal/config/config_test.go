@@ -174,3 +174,74 @@ func TestAgentAlarmCanBeSwitchedOff(t *testing.T) {
 		t.Fatalf("%v %+v", err, a)
 	}
 }
+
+func TestNewHubAndAgentSettingsHaveSafeDefaults(t *testing.T) {
+	h, err := ParseHub(nil, envOf(hubEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.LockFile != "" || h.AllowGroupRead || h.TelegramBase != "https://api.telegram.org" {
+		t.Fatalf("%+v", h)
+	}
+	a, err := ParseAgent(nil, envOf(agentEnv(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ReorderWindow != 2*time.Second || a.AllowGroupRead || !strings.HasSuffix(a.AlarmCodeState, "alarm-code-state") {
+		t.Fatalf("%+v", a)
+	}
+	e := hubEnv()
+	e["CB_LOCK_FILE"] = "/var/lib/bridge/lock"
+	e["CB_ALLOW_GROUP_READ"] = "true"
+	h, err = ParseHub(nil, envOf(e))
+	if err != nil || h.LockFile != "/var/lib/bridge/lock" || !h.AllowGroupRead {
+		t.Fatalf("%v %+v", err, h)
+	}
+	ae := agentEnv(t)
+	ae["CB_REORDER_WINDOW"] = "5s"
+	if a, err = ParseAgent(nil, envOf(ae)); err != nil || a.ReorderWindow != 5*time.Second {
+		t.Fatalf("%v %+v", err, a)
+	}
+}
+
+func TestBotAPIAddressMustNotSendTheTokenInTheClear(t *testing.T) {
+	for base, ok := range map[string]bool{
+		"https://api.telegram.org":    true,
+		"https://bot-api.example.com": true,
+		"http://127.0.0.1:8081":       true,
+		"http://localhost:8081":       true,
+		"http://[::1]:8081":           true,
+		"http://api.example.com":      false,
+		"http://10.0.0.5:8081":        false,
+		"ftp://api.telegram.org":      false,
+		"api.telegram.org":            false,
+		"https://":                    false,
+	} {
+		e := hubEnv()
+		e["CB_TELEGRAM_API_BASE"] = base
+		_, err := ParseHub(nil, envOf(e))
+		if (err == nil) != ok {
+			t.Errorf("%s: accepted=%v, want %v (%v)", base, err == nil, ok, err)
+		}
+	}
+}
+
+func TestGroupReadableSecretsNeedTheExplicitSetting(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "token")
+	os.WriteFile(f, []byte("9:fromfile\n"), 0o600)
+	os.Chmod(f, 0o640)
+	e := hubEnv()
+	delete(e, "TELEGRAM_BOT_TOKEN")
+	e["CB_TELEGRAM_TOKEN_FILE"] = f
+	if _, err := ParseHub(nil, envOf(e)); err == nil {
+		t.Fatal("a group-readable token file was accepted without CB_ALLOW_GROUP_READ")
+	}
+	e["CB_ALLOW_GROUP_READ"] = "true"
+	if h, err := ParseHub(nil, envOf(e)); err != nil || h.Token != "9:fromfile" {
+		t.Fatalf("%v %+v", err, h)
+	}
+	os.Chmod(f, 0o604)
+	if _, err := ParseHub(nil, envOf(e)); err == nil {
+		t.Fatal("a world-readable token file was accepted")
+	}
+}

@@ -129,3 +129,24 @@ func TestGenerateRejectsBadName(t *testing.T) {
 		t.Fatal("an invalid name was accepted")
 	}
 }
+
+func TestGroupReadIsAllowedOnlyWhenAskedFor(t *testing.T) {
+	id, _ := Generate("laptop")
+	path := filepath.Join(t.TempDir(), "id.json")
+	if err := id.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(path, 0o640)
+	if _, err := Load(path); err == nil {
+		t.Fatal("a group-readable identity was accepted by default")
+	}
+	if _, err := LoadOpts(path, true); err != nil {
+		t.Fatalf("group read refused although allowed: %v", err)
+	}
+	for _, mode := range []os.FileMode{0o660, 0o604, 0o644, 0o666} {
+		os.Chmod(path, mode)
+		if _, err := LoadOpts(path, true); err == nil {
+			t.Fatalf("mode %v accepted even with group read allowed", mode)
+		}
+	}
+}

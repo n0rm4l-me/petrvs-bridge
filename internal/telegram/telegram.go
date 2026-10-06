@@ -78,8 +78,12 @@ func clean(method string, err error) error {
 	return fmt.Errorf("telegram %s: %w", method, err)
 }
 
-// slack is how long a call may run beyond the wait it asked the server for.
-const slack = 15 * time.Second
+// How long a call may run: a long poll gets slack beyond the wait it asked the server for, a send gets sendTimeout.
+// Variables so that tests can shorten them.
+var (
+	slack       = 15 * time.Second
+	sendTimeout = 30 * time.Second
+)
 
 func (c *HTTP) call(ctx context.Context, method string, body any, within time.Duration) (*apiResponse, error) {
 	raw, err := json.Marshal(body)
@@ -176,7 +180,7 @@ func Chunks(text string, max int) []string {
 func (c *HTTP) Send(ctx context.Context, chatID int64, text string) error {
 	for _, part := range Chunks(text, MaxMessage) {
 		for attempt := 0; ; attempt++ {
-			_, err := c.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": part, "disable_web_page_preview": true}, 30*time.Second)
+			_, err := c.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": part, "disable_web_page_preview": true}, sendTimeout)
 			var rl ErrRateLimited
 			if errors.As(err, &rl) && attempt < 2 {
 				wait := rl.After

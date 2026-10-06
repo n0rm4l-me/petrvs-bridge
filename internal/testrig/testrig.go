@@ -104,6 +104,13 @@ type Options struct {
 	Alarm bool
 	// AlarmSecret, if set, makes disarming require a one-time code for this secret.
 	AlarmSecret []byte
+	// Heartbeat overrides the agents' heartbeat interval. A long one keeps the bus quiet, so a test can tell which
+	// message is which by counting.
+	Heartbeat time.Duration
+	// ReorderWindow overrides how long an agent waits for a missing earlier command.
+	ReorderWindow time.Duration
+	// HubLockFile gives the hub a lock file, so a lockdown survives StartHub.
+	HubLockFile bool
 }
 
 // Sensor is an alarm sensor the test triggers by hand.
@@ -230,6 +237,12 @@ func New(t *testing.T, o Options) *Rig {
 		if o.SilenceLimit > 0 {
 			ar.cfg.SilenceLimit = o.SilenceLimit
 		}
+		if o.Heartbeat > 0 {
+			ar.cfg.HeartbeatEvery = o.Heartbeat
+		}
+		if o.ReorderWindow > 0 {
+			ar.cfg.ReorderWindow = o.ReorderWindow
+		}
 		if r.Clock != nil {
 			ar.cfg.Now = r.Clock.Now
 		}
@@ -242,6 +255,9 @@ func New(t *testing.T, o Options) *Rig {
 	}
 	if o.OfflineAfter > 0 {
 		r.hubCfg.OfflineAfter = o.OfflineAfter
+	}
+	if o.HubLockFile {
+		r.hubCfg.LockFile = filepath.Join(t.TempDir(), "hub-lock")
 	}
 	if r.Clock != nil {
 		r.hubCfg.Now = r.Clock.Now
@@ -362,6 +378,17 @@ func (r *Rig) WaitConnected(name string) {
 // Say types a message as the authorised user.
 func (r *Rig) Say(text string) {
 	r.TG.Push(telegram.Update{ID: nextID(), ChatID: ChatID, UserID: UserID, Text: text})
+}
+
+// SayAt types a message that Telegram received at the given time, which may be long ago (a backlog after an outage).
+func (r *Rig) SayAt(text string, at time.Time) {
+	r.TG.Push(telegram.Update{ID: nextID(), ChatID: ChatID, UserID: UserID, Text: text, Date: at})
+}
+
+// SetLockFile changes where an agent keeps its lock; call it before StartAgent.
+func (a *AgentRig) SetLockFile(path string) {
+	a.LockFile = path
+	a.cfg.LockFile = path
 }
 
 // SayAs types a message as someone else.

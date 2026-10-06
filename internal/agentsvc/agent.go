@@ -199,8 +199,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	defer cancel()
 	if a.cfg.LockFile != "" {
 		a.mu.Lock()
-		a.lockedLocked()
+		locked := a.lockedLocked()
 		a.mu.Unlock()
+		if locked {
+			a.log.Warn("starting locked: text and keys are refused until the lock file is removed with `agent unlock`", "lock_file", a.cfg.LockFile)
+		}
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- a.cfg.Transport.Receive(ctx, a.cfg.Names.AgentSub(a.cfg.Identity.Name), a.handle) }()
@@ -566,7 +569,7 @@ func (a *Agent) runQueue(ctx context.Context) {
 				return
 			}
 			missing = a.cmdNext
-			a.cmdNext++ // later gaps are skipped at once: this wait already counted for them
+			a.cmdNext++ // several missing numbers in a row share one wait; a gap after a command that ran waits again
 		}
 		a.mu.Unlock()
 		if missing != 0 {

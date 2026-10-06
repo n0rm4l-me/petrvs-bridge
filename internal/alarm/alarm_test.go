@@ -334,3 +334,35 @@ func TestDefaultSensorsExistOnThisPlatform(t *testing.T) {
 		}
 	}
 }
+
+func TestArmFailsCleanlyWhenTheStateFileCannotBeWritten(t *testing.T) {
+	a, err := New(Config{Sensors: []Sensor{&fake{name: "input"}}, StateFile: filepath.Join(t.TempDir(), "missing", "armed")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Arm(); err == nil {
+		t.Fatal("arming claimed success without a state file")
+	}
+	if a.Armed() {
+		t.Fatal("the alarm is armed in memory only; a restart would silently disarm it")
+	}
+}
+
+func TestDisarmFailsSafeWhenTheStateFileCannotBeRemoved(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permissions do not bind root")
+	}
+	dir := t.TempDir()
+	a, _ := New(Config{Sensors: []Sensor{&fake{name: "input"}}, StateFile: filepath.Join(dir, "armed")})
+	if err := a.Arm(); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(dir, 0o500)
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if err := a.Disarm(); err == nil {
+		t.Fatal("disarm claimed success")
+	}
+	if !a.Armed() {
+		t.Fatal("the alarm went off in memory while its file stayed: after a restart it would be armed again, unannounced")
+	}
+}

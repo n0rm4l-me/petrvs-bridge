@@ -126,3 +126,34 @@ func TestDrainStopsOnCancelledContext(t *testing.T) {
 		t.Fatal("message lost")
 	}
 }
+
+func TestOversizedAndCorruptFilesAreSetAside(t *testing.T) {
+	s := open(t)
+	big := filepath.Join(s.dir, "00000000000000000001-1-aaaaaaaa.json")
+	os.WriteFile(big, []byte(`{"type":"reply","body":"`+strings.Repeat("x", 2*wire.MaxBody+10000)+`"}`), 0o600)
+	os.WriteFile(filepath.Join(s.dir, "00000000000000000002-1-bbbbbbbb.json"), []byte("{"), 0o600)
+	s.Add(wire.TypeReply, "good")
+	es, err := s.List()
+	if err != nil || len(es) != 1 || es[0].Item.Body != "good" {
+		t.Fatalf("%v %v", es, err)
+	}
+	if _, err := os.Stat(big + ".bad"); err != nil {
+		t.Fatal("the oversized file was not set aside")
+	}
+}
+
+func TestConcurrentAddsNeverShareAFile(t *testing.T) {
+	s := open(t)
+	done := make(chan error, 100)
+	for i := 0; i < 100; i++ {
+		go func() { done <- s.Add(wire.TypeReply, "m") }()
+	}
+	for i := 0; i < 100; i++ {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := s.Len(); n != 100 {
+		t.Fatalf("%d files for 100 messages: names collided", n)
+	}
+}
