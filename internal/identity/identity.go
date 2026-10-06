@@ -125,7 +125,7 @@ func CheckPrivateMode(path string, allowGroupRead bool) error {
 		bad = 0o027
 	}
 	if st.Mode().Perm()&bad != 0 {
-		return fmt.Errorf("%s has mode %v, which lets other users in; chmod 600", path, st.Mode().Perm())
+		return fmt.Errorf("%s is readable by other users (mode %v); chmod 600", path, st.Mode().Perm())
 	}
 	return nil
 }

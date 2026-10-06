@@ -287,7 +287,7 @@ func TestDelayedCommandsExpireInsteadOfRunning(t *testing.T) {
 	r.Eventually("relayed", func() bool { return r.Hub.Stats().Relayed == 1 })
 	clock.Advance(11 * time.Minute) // longer than the text time-to-live
 	r.Mem.Release(r.Names.AgentSub("laptop"), nil)
-	r.WaitSent("expired before it arrived")
+	r.WaitSent("expired before it could run")
 	time.Sleep(200 * time.Millisecond)
 	if len(a.Exec.Texts()) != 0 {
 		t.Fatal("a stale command was executed")

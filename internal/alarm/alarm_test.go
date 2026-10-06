@@ -106,13 +106,18 @@ func TestCooldownIsPerSensor(t *testing.T) {
 	}
 }
 
-func TestArmingRetakesTheBaseline(t *testing.T) {
+func TestArmingTakesTheBaselineOnlyWhenItWasOff(t *testing.T) {
 	s := &fake{name: "input"}
 	a, _, _, _ := rig(t, s)
 	a.Arm()
+	a.Arm() // a repeated "on" must not hide a touch that happened just before it
+	if s.resets != 1 {
+		t.Fatalf("resets = %d, want 1: arming an armed alarm retook the baseline", s.resets)
+	}
+	a.Disarm()
 	a.Arm()
 	if s.resets != 2 {
-		t.Fatalf("resets = %d", s.resets)
+		t.Fatalf("resets = %d, want 2 after disarm and arm", s.resets)
 	}
 }
 

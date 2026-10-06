@@ -674,7 +674,7 @@ func (a *Agent) alert(ctx context.Context, e alarm.Event, held int) {
 func (a *Agent) alarmStatus() string {
 	s := a.cfg.Alarm.Status()
 	if a.cfg.AlarmCode == nil {
-		s += ". No disarm code is set (CB_ALARM_SECRET_FILE): anyone who controls the chat can turn the alarm off"
+		s += ". No disarm code is configured on this machine: anyone who controls the chat can turn the alarm off"
 	}
 	return s
 }

@@ -74,6 +74,8 @@ func stateBytes(t testing.TB, r *Ratchet) []byte {
 
 func TestRoundTripBothDirections(t *testing.T) {
 	a, b := pair(t)
+	a.SetDHStepLimit(1000, 1000, nil) // this test turns the ratchet far faster than any real conversation
+	b.SetDHStepLimit(1000, 1000, nil)
 	mustDec(t, b, mustEnc(t, a, "status?"), "status?")
 	mustDec(t, a, mustEnc(t, b, "all good"), "all good")
 	for i := 0; i < 20; i++ {
