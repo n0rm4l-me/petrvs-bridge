@@ -279,6 +279,11 @@ func (h *Hub) HandleText(ctx context.Context, text string) {
 		h.active = arg
 		h.mu.Unlock()
 		h.say(ctx, "Active agent: "+arg)
+	case "/alarm":
+		if arg == "" {
+			arg = "status"
+		}
+		h.deliver(ctx, h.activeName(), wire.TypeAlarm, arg, h.cfg.KeyTTL)
 	case "/lockdown":
 		h.lockdown(ctx)
 	case "/unlock":
@@ -287,7 +292,7 @@ func (h *Hub) HandleText(ctx context.Context, text string) {
 		h.mu.Unlock()
 		h.say(ctx, "The hub relays again. Agents that were locked stay locked until someone unlocks them on their own machine.")
 	default:
-		h.say(ctx, "Unknown command. Known: /agents /agent NAME /enter /esc /up /down /tab /key N /lockdown /unlock, or @name text.")
+		h.say(ctx, "Unknown command. Known: /agents /agent NAME /enter /esc /up /down /tab /key N /alarm on|off|status /lockdown /unlock, or @name text.")
 	}
 }
 
@@ -531,7 +536,7 @@ func (h *Hub) onMsg(ctx context.Context, m *transport.Message) {
 	h.mu.Unlock()
 	if dup {
 		// Already shown. The agent is asking again because it never got the receipt: confirm, do not repeat.
-		if p.Type == wire.TypeReply || p.Type == wire.TypeNotice {
+		if p.Type == wire.TypeReply || p.Type == wire.TypeNotice || p.Type == wire.TypeAlert {
 			h.receipt(ctx, name, s, p.ID)
 		}
 		return
@@ -549,9 +554,13 @@ func (h *Hub) onMsg(ctx context.Context, m *transport.Message) {
 			h.say(ctx, "✅ "+name+" is back.")
 		}
 		h.ackHeartbeat(ctx, name, s)
-	case wire.TypeReply, wire.TypeNotice:
+	case wire.TypeReply, wire.TypeNotice, wire.TypeAlert:
 		// Confirm only after the chat accepted it; if it did not, stay silent so the agent sends it again.
-		if err := h.sayErr(ctx, h.tag(name)+p.Body); err == nil {
+		text := h.tag(name) + p.Body
+		if p.Type == wire.TypeAlert {
+			text = "🚨 ALARM " + text
+		}
+		if err := h.sayErr(ctx, text); err == nil {
 			h.markSeen(st, p.ID)
 			h.receipt(ctx, name, s, p.ID)
 		}
@@ -623,7 +632,11 @@ func (h *Hub) checkOffline(ctx context.Context) {
 	for n, st := range h.agents {
 		if st.everConnected && !st.offlineNotice && now.Sub(st.lastSeen) > h.cfg.OfflineAfter {
 			st.offlineNotice = true
-			notify = append(notify, fmt.Sprintf("⚠️ %s went offline (last heard %s ago).", n, now.Sub(st.lastSeen).Round(time.Second)))
+			msg := fmt.Sprintf("⚠️ %s went offline (last heard %s ago).", n, now.Sub(st.lastSeen).Round(time.Second))
+			if st.info["alarm"] == "on" {
+				msg = "🚨 " + msg + " Its alarm was armed."
+			}
+			notify = append(notify, msg)
 		}
 	}
 	h.mu.Unlock()

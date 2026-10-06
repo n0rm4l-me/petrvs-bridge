@@ -60,7 +60,7 @@ func (s *Spool) files() ([]string, error) {
 
 // Add queues a reply or notice.
 func (s *Spool) Add(t wire.Type, body string) error {
-	if t != wire.TypeReply && t != wire.TypeNotice {
+	if t != wire.TypeReply && t != wire.TypeNotice && t != wire.TypeAlert {
 		return fmt.Errorf("spool: type %q cannot be queued", t)
 	}
 	if len(body) > wire.MaxBody {
@@ -116,7 +116,7 @@ func (s *Spool) List() ([]Entry, error) {
 			continue
 		}
 		var it Item
-		if json.Unmarshal(data, &it) != nil || (it.Type != wire.TypeReply && it.Type != wire.TypeNotice) {
+		if json.Unmarshal(data, &it) != nil || (it.Type != wire.TypeReply && it.Type != wire.TypeNotice && it.Type != wire.TypeAlert) {
 			os.Rename(path, path+".bad")
 			continue
 		}
@@ -162,7 +162,7 @@ func (s *Spool) Drain(ctx context.Context, publish func(context.Context, Item) e
 			return sent, err
 		}
 		var it Item
-		if json.Unmarshal(data, &it) != nil || (it.Type != wire.TypeReply && it.Type != wire.TypeNotice) {
+		if json.Unmarshal(data, &it) != nil || (it.Type != wire.TypeReply && it.Type != wire.TypeNotice && it.Type != wire.TypeAlert) {
 			os.Rename(path, path+".bad")
 			continue
 		}

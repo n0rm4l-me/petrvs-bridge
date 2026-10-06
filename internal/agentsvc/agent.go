@@ -11,12 +11,16 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"claudebridge/internal/alarm"
+	"claudebridge/internal/approval"
 	"claudebridge/internal/handshake"
 	"claudebridge/internal/identity"
 	"claudebridge/internal/ratchet"
@@ -52,6 +56,10 @@ type Config struct {
 	SilenceLimit   time.Duration // default 3 x HeartbeatEvery: no hub answer for this long means re-handshake
 	SpoolEvery     time.Duration // default 2s
 	SkewAllowance  time.Duration // default 30s
+	// Alarm, if set, is armed and disarmed from the chat and reports touches of this machine.
+	Alarm *alarm.Alarm
+	// AlarmCode, if set, is required to disarm the alarm: "/alarm off 123456" with a current one-time code.
+	AlarmCode *approval.Verifier
 	// ReceiptTimeout is how long a spooled message waits for the hub's receipt before it is sent again.
 	ReceiptTimeout time.Duration // default 30s
 }
@@ -168,6 +176,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	if a.cfg.Spool != nil {
 		go a.loop(ctx, a.cfg.SpoolEvery, false, a.spoolTick)
 	}
+	if a.cfg.Alarm != nil {
+		a.cfg.Alarm.SetNotify(a.alert)
+		go a.cfg.Alarm.Run(ctx)
+	}
 	select {
 	case <-ctx.Done():
 		return nil
@@ -233,6 +245,12 @@ func (a *Agent) heartbeatTick(ctx context.Context) {
 		return
 	}
 	meta := map[string]string{"locked": boolStr(a.Locked())}
+	if a.cfg.Alarm != nil {
+		meta["alarm"] = map[bool]string{true: "on", false: "off"}[a.cfg.Alarm.Armed()]
+		if blind := a.cfg.Alarm.Blind(); len(blind) > 0 {
+			meta["alarm_blind"] = strings.Join(blind, ",")
+		}
+	}
 	if a.cfg.Info != nil {
 		for k, v := range a.cfg.Info() {
 			if len(meta) < 12 {
@@ -413,6 +431,13 @@ func (a *Agent) onMsg(ctx context.Context, m *transport.Message) {
 		}
 	case wire.TypeLockdown:
 		a.lock()
+	case wire.TypeAlarm:
+		if p.Expired(now, a.cfg.SkewAllowance) {
+			a.expired.Add(1)
+			a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "alarm command expired before it arrived, not applied"})
+			return
+		}
+		a.alarmCommand(ctx, p.Body)
 	case wire.TypeText, wire.TypeKey:
 		if p.Expired(now, a.cfg.SkewAllowance) {
 			a.expired.Add(1)
@@ -468,4 +493,57 @@ func (a *Agent) execute(ctx context.Context, p *wire.Payload) {
 	}
 	a.executed.Add(1)
 	a.log.Info("executed", "type", p.Type, "id", p.ID, "bytes", len(p.Body))
+}
+
+// alert reports a touch of the machine. It goes through the spool when there is one, so it is confirmed by the hub and
+// survives a hub restart or a network gap; a late alert still says when it happened.
+func (a *Agent) alert(ctx context.Context, e alarm.Event, held int) {
+	body := a.cfg.Now().Format("2006-01-02 15:04:05 -0700") + " " + e.Detail
+	if held > 0 {
+		body += fmt.Sprintf(" (and %d more since the last report)", held)
+	}
+	a.log.Warn("alarm", "sensor", e.Sensor, "held_back", held)
+	if a.cfg.Spool != nil {
+		if err := a.cfg.Spool.Add(wire.TypeAlert, body); err == nil {
+			return
+		}
+	}
+	a.send(ctx, &wire.Payload{Type: wire.TypeAlert, Body: body, Meta: map[string]string{"sensor": e.Sensor}})
+}
+
+func (a *Agent) alarmCommand(ctx context.Context, body string) {
+	if a.cfg.Alarm == nil {
+		a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "this machine has no alarm configured"})
+		return
+	}
+	cmd, arg, _ := strings.Cut(strings.TrimSpace(body), " ")
+	switch cmd {
+	case "on":
+		if err := a.cfg.Alarm.Arm(); err != nil {
+			a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "could not arm the alarm"})
+			return
+		}
+		a.send(ctx, &wire.Payload{Type: wire.TypeNotice, Body: "🚨 Alarm armed. Any touch of this machine will be reported. " + a.cfg.Alarm.Status()})
+	case "off":
+		if a.Locked() {
+			a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "refused: this machine is locked, so the alarm stays armed"})
+			return
+		}
+		if a.cfg.AlarmCode != nil {
+			if err := a.cfg.AlarmCode.Verify(strings.TrimSpace(arg), a.cfg.Now()); err != nil {
+				a.refused.Add(1)
+				a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "alarm not disarmed: a current one-time code is required (/alarm off 123456)"})
+				return
+			}
+		}
+		if err := a.cfg.Alarm.Disarm(); err != nil {
+			a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "could not disarm the alarm"})
+			return
+		}
+		a.send(ctx, &wire.Payload{Type: wire.TypeNotice, Body: "Alarm disarmed."})
+	case "status", "":
+		a.send(ctx, &wire.Payload{Type: wire.TypeNotice, Body: a.cfg.Alarm.Status()})
+	default:
+		a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: "unknown alarm command; use on, off or status"})
+	}
 }

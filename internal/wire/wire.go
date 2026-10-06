@@ -42,6 +42,7 @@ const (
 	TypeKey      Type = "key"      // one key: Enter, Escape, Up, Down, 1..9
 	TypeLockdown Type = "lockdown" // stop acting on text and keys until unlocked locally
 	TypePing     Type = "ping"
+	TypeAlarm    Type = "alarm" // arm or disarm the alarm, or ask for its status: Body is "on", "off [code]" or "status"
 	TypeHBAck    Type = "hback" // the hub saw the heartbeat
 	TypeReceipt  Type = "rcpt"  // the hub took a reply or notice; Body is the payload id
 	// agent to hub
@@ -50,12 +51,13 @@ const (
 	TypeNotice    Type = "notice"  // an event the user should see
 	TypeHeartbeat Type = "hb"      // liveness, with a few facts in Meta
 	TypeDropped   Type = "dropped" // a command was refused or expired; Body says why
+	TypeAlert     Type = "alert"   // someone touched the machine while the alarm was armed
 	TypePong      Type = "pong"
 )
 
 var (
-	toAgent = map[Type]bool{TypeText: true, TypeKey: true, TypeLockdown: true, TypePing: true, TypeHBAck: true, TypeReceipt: true}
-	toHub   = map[Type]bool{TypeReady: true, TypeReply: true, TypeNotice: true, TypeHeartbeat: true, TypeDropped: true, TypePong: true}
+	toAgent = map[Type]bool{TypeText: true, TypeKey: true, TypeLockdown: true, TypePing: true, TypeHBAck: true, TypeReceipt: true, TypeAlarm: true}
+	toHub   = map[Type]bool{TypeReady: true, TypeReply: true, TypeNotice: true, TypeHeartbeat: true, TypeDropped: true, TypePong: true, TypeAlert: true}
 )
 
 // ErrPayload is returned for a payload that decrypts but is not acceptable.

@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"claudebridge/internal/agentsvc"
+	"claudebridge/internal/alarm"
+	"claudebridge/internal/approval"
 	"claudebridge/internal/hubsvc"
 	"claudebridge/internal/identity"
 	"claudebridge/internal/spool"
@@ -98,6 +100,31 @@ type Options struct {
 	OfflineAfter time.Duration
 	// Slow uses relaxed timings for a bus with real latency.
 	Slow bool
+	// Alarm gives every agent an alarm with a sensor the test controls.
+	Alarm bool
+	// AlarmSecret, if set, makes disarming require a one-time code for this secret.
+	AlarmSecret []byte
+}
+
+// Sensor is an alarm sensor the test triggers by hand.
+type Sensor struct {
+	mu   sync.Mutex
+	hits int
+}
+
+func (s *Sensor) Name() string { return "input" }
+
+// Touch makes the next check report a touch.
+func (s *Sensor) Touch() { s.mu.Lock(); s.hits++; s.mu.Unlock() }
+
+func (s *Sensor) Check(context.Context) (alarm.Event, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hits > 0 {
+		s.hits = 0
+		return alarm.Event{Sensor: "input", Detail: "keyboard, mouse or trackpad was used"}, true, nil
+	}
+	return alarm.Event{}, false, nil
 }
 
 // AgentRig is one agent and its surroundings.
@@ -107,9 +134,14 @@ type AgentRig struct {
 	Exec     *Exec
 	Spool    *spool.Spool
 	LockFile string
-	cfg      agentsvc.Config
-	cancel   context.CancelFunc
-	done     chan struct{}
+	// Sensor is the alarm's test sensor (nil when the rig has no alarm).
+	Sensor     *Sensor
+	AlarmState string
+	Alarm      *alarm.Alarm
+	cfg        agentsvc.Config
+	mult       time.Duration
+	cancel     context.CancelFunc
+	done       chan struct{}
 }
 
 // Rig is a complete system under test.
@@ -180,9 +212,17 @@ func New(t *testing.T, o Options) *Rig {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ar := &AgentRig{ID: id, Exec: &Exec{}, Spool: sp, LockFile: filepath.Join(t.TempDir(), "lock-"+name)}
+		ar := &AgentRig{ID: id, Exec: &Exec{}, Spool: sp, LockFile: filepath.Join(t.TempDir(), "lock-"+name), mult: r.mult}
+		if o.Alarm {
+			ar.Sensor = &Sensor{}
+			ar.AlarmState = filepath.Join(t.TempDir(), "alarm-"+name)
+			if o.AlarmSecret != nil {
+				ar.cfg.AlarmCode = approval.NewVerifier(o.AlarmSecret)
+			}
+		}
 		m := r.mult
-		ar.cfg = agentsvc.Config{
+		code := ar.cfg.AlarmCode
+		ar.cfg = agentsvc.Config{AlarmCode: code,
 			Identity: id, Hub: r.HubID.Public(), Transport: r.Bus, Names: r.Names, Exec: ar.Exec, Spool: sp, LockFile: ar.LockFile,
 			Log: quietLog(), HeartbeatEvery: 100 * time.Millisecond * m, HandshakeEvery: 150 * time.Millisecond * m,
 			SilenceLimit: 600 * time.Millisecond * m, SpoolEvery: 40 * time.Millisecond * m, ReceiptTimeout: 300 * time.Millisecond * m,
@@ -238,7 +278,15 @@ func (r *Rig) StartAgent(name string) {
 	r.T.Helper()
 	r.StopAgent(name)
 	ar := r.Agents[name]
-	a, err := agentsvc.New(ar.cfg)
+	cfg := ar.cfg
+	if ar.Sensor != nil { // a restarted agent reloads its alarm from the state file
+		al, err := alarm.New(alarm.Config{Sensors: []alarm.Sensor{ar.Sensor}, Poll: 20 * time.Millisecond * ar.mult, Cooldown: 400 * time.Millisecond * ar.mult, StateFile: ar.AlarmState, Now: cfg.Now})
+		if err != nil {
+			r.T.Fatal(err)
+		}
+		ar.Alarm, cfg.Alarm = al, al
+	}
+	a, err := agentsvc.New(cfg)
 	if err != nil {
 		r.T.Fatal(err)
 	}
