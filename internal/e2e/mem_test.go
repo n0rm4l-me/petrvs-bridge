@@ -22,10 +22,6 @@ func one(t *testing.T, opts testrig.Options) (*testrig.Rig, *testrig.AgentRig) {
 	return r, r.Agents["laptop"]
 }
 
-func typed(a *testrig.AgentRig) func(n int) func() bool {
-	return func(n int) func() bool { return func() bool { return len(a.Exec.Texts()) >= n } }
-}
-
 func TestConnectRelayAndReply(t *testing.T) {
 	r, a := one(t, testrig.Options{})
 	r.WaitSent("laptop is connected")
