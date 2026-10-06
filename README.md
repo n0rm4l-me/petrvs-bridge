@@ -26,7 +26,7 @@ security audit**. Read the limitations before trusting it with anything that mat
 
 ## Quick start on one machine (Pub/Sub emulator)
 
-You need Go, tmux, and for the emulator `gcloud` with `gcloud components install pubsub-emulator` (and Java).
+You need Go 1.26.6 or newer (the `go` line in `go.mod` makes Go fetch a fixed toolchain by itself), tmux, and for the emulator `gcloud` with `gcloud components install pubsub-emulator` (and Java).
 
 ```sh
 make build                                   # bin/hub bin/agent bin/bridgekeys
@@ -193,6 +193,7 @@ make test              # unit tests and the in-memory end-to-end tests, with the
 make test-emulator     # everything, including the Pub/Sub emulator tests and the real-binary smoke test
 make fuzz              # 30 seconds of fuzzing of the ratchet's decrypt
 make cover
+make vuln            # govulncheck: known vulnerabilities in the code paths this program uses
 ```
 
 `scripts/with-emulator.sh CMD` runs a command with an emulator available (it starts one with gcloud if
