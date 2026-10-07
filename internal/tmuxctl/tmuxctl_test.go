@@ -22,7 +22,7 @@ func TestSendTextIsLiteralAndSeparatedByDoubleDash(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := [][]string{
-		{"send-keys", "-t", "claude", "-l", "--", "-t evil; rm -rf / && $(x)", ";", "send-keys", "-t", "claude", "Enter"},
+		{"send-keys", "-t", "claude", "-l", "--", "-t evil; rm -rf / && $(x)", ";", "run-shell", "sleep " + enterDelay, ";", "send-keys", "-t", "claude", "Enter"},
 	}
 	if !reflect.DeepEqual(r.calls, want) {
 		t.Fatalf("calls = %v", r.calls)

@@ -79,6 +79,25 @@ func TestRealTmuxTypesTheTextExactly(t *testing.T) {
 	}
 }
 
+// Enter has to follow the text after a pause, not with it (see enterDelay): Claude Code took a quick burst plus Enter for a
+// paste and left the text in its input box. cat shows a typed line at once and prints it a second time only after Enter,
+// so the pane tells the two moments apart: once during the pause, twice after SendText returns.
+func TestRealTmuxPausesBetweenTextAndEnter(t *testing.T) {
+	tm, pane := realSession(t)
+	const text = "pause-check-7f3a9c"
+	done := make(chan error, 1)
+	go func() { done <- tm.SendText(context.Background(), text) }()
+	if n := strings.Count(pane(), text); n != 1 { // pane() waits 150 ms, which is inside the pause
+		t.Fatalf("during the pause the text appears %d times, want 1 (typed, not yet entered)", n)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(pane(), text); n != 2 {
+		t.Fatalf("after SendText the text appears %d times, want 2 (typed and echoed after Enter)", n)
+	}
+}
+
 func TestRealTmuxDoesNotInterleaveConcurrentSenders(t *testing.T) {
 	tm, pane := realSession(t)
 	const n = 12
