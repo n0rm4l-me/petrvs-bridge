@@ -46,7 +46,7 @@ func TestARestartedHubForgetsTheChoiceAndAsksAgain(t *testing.T) {
 func TestTappingAnAgentButtonSwitchesWhereTextGoes(t *testing.T) {
 	r, laptop, nas := pair(t)
 	r.Say("/agents")
-	r.WaitSent("nas: online")
+	r.WaitSent("nas — online")
 	var buttons int
 	for _, s := range r.TG.Sent() {
 		buttons += len(s.Buttons)
@@ -106,15 +106,24 @@ func TestAnAnswerToTheChosenAgentsOwnMessageNeedsNoNote(t *testing.T) {
 	}
 }
 
-func TestAnAnswerToAMessageThatIsNotAnAgentsGoesToTheChosenAgent(t *testing.T) {
+// With several agents the hub cannot tell which one wrote a message it has forgotten (after a restart, or when newer messages
+// pushed it out), and the active agent is only a guess: typing "yes" into the wrong machine is worse than asking again.
+func TestAnAnswerToAMessageTheHubForgotIsNotGuessedWithSeveralAgents(t *testing.T) {
 	r, laptop, nas := pair(t)
 	r.Say("/agent nas")
 	r.WaitSent("Active agent: nas")
 	r.SayReplyTo("hello", 424242)
-	r.Eventually("nas typed", func() bool { return len(nas.Exec.Texts()) == 1 })
-	if len(laptop.Exec.Texts()) != 0 {
-		t.Fatal("a reply to an unknown message went to the wrong agent")
-	}
+	r.WaitSent("no longer knows which agent")
+	r.Never("text typed anywhere", 400*time.Millisecond, func() bool {
+		return len(nas.Exec.Texts())+len(laptop.Exec.Texts()) > 0
+	})
+}
+
+// With one agent there is nothing to confuse: the answer goes to it.
+func TestAnAnswerToAnUnknownMessageGoesToTheOnlyAgent(t *testing.T) {
+	r, only := one(t, testrig.Options{})
+	r.SayReplyTo("hello", 424242)
+	r.Eventually("typed", func() bool { return len(only.Exec.Texts()) == 1 })
 }
 
 func TestAtNameWithAKeyCommandPressesTheKeyAndOtherSlashTextIsTyped(t *testing.T) {
@@ -142,4 +151,28 @@ func TestAtNameAlarmCommandReachesOnlyThatAgent(t *testing.T) {
 	if r.Agents["laptop"].Alarm.Armed() {
 		t.Fatal("the other agent was armed too")
 	}
+}
+
+// Shift+Tab cycles Claude Code's permission mode, so it is a key of its own that has to be asked for by name: /key btab.
+// It is not among the one-tap commands of the bot's menu, where a slip of the finger would change the mode.
+func TestKeyBTabReachesOnlyTheNamedAgentAndOnlyUnderItsKeyName(t *testing.T) {
+	r, laptop, nas := pair(t)
+	r.Say("@nas /key btab")
+	r.Eventually("BTab on nas", func() bool { return len(nas.Exec.Keys()) == 1 })
+	r.Say("@nas /key BTab")
+	r.Eventually("BTab again on nas", func() bool { return len(nas.Exec.Keys()) == 2 })
+	r.Say("@nas /key Shift+Tab")
+	r.Eventually("Shift+Tab on nas", func() bool { return len(nas.Exec.Keys()) == 3 })
+	for i, k := range nas.Exec.Keys() {
+		if k != "BTab" {
+			t.Errorf("key %d is %q, want BTab", i, k)
+		}
+	}
+	if len(laptop.Exec.Keys())+len(laptop.Exec.Texts()) != 0 {
+		t.Fatal("the laptop was touched")
+	}
+	// no command for it in the menu, and no bare /btab
+	r.Say("/btab")
+	r.WaitSent("Unknown command")
+	r.Never("a key typed by /btab", 300*time.Millisecond, func() bool { return len(nas.Exec.Keys()) != 3 })
 }

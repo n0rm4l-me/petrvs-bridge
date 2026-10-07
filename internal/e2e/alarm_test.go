@@ -109,7 +109,7 @@ func TestAnArmedAlarmSurvivesAnAgentRestart(t *testing.T) {
 	a.Sensor.Touch()
 	r.Eventually("alert after restart", func() bool { return alerts(r) == 1 })
 	r.Say("/agents")
-	r.WaitSent("alarm=on")
+	r.WaitSent("alarm armed") // the status card says it in words
 }
 
 func TestDisarmingCanRequireAOneTimeCode(t *testing.T) {

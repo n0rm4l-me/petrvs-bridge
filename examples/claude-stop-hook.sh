@@ -5,6 +5,7 @@
 #     { "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "/path/to/claude-stop-hook.sh" } ] } ] } }
 #
 # Needs jq and the `agent` binary (on PATH, or set AGENT_BIN). Set PB_STATE_DIR if the agent uses a non-default one.
+# Pictures that Claude read during the turn are sent to the chat after the answer (see the end); PB_FORWARD_IMAGES=off stops that.
 # The transcript format belongs to Claude Code and can change: this reads lines marked "type":"user" with
 # "origin":{"kind":"human"} as your messages and "type":"assistant" lines as the answer.
 set -eu
@@ -46,5 +47,23 @@ done
 if [ -z "$TEXT" ] || [ "$TEXT" = "null" ]; then exit 0; fi
 
 # Move the mark only after the message is safely in the spool.
-printf '%s' "$TEXT" | "${AGENT_BIN:-agent}" send - && echo "$TOTAL" > "$MARK"
+if printf '%s' "$TEXT" | "${AGENT_BIN:-agent}" send -; then
+  echo "$TOTAL" > "$MARK"
+  # The pictures that Claude read in this turn (Read calls on .png .jpg .jpeg .webp .gif that still exist) follow the
+  # answer into the chat, at most 3 and each once. `agent send-file` has the last word: it refuses secrets, links to
+  # them, empty and oversized files, and sends at most 10 files a minute; its refusals are of no interest here. They
+  # are taken from the lines this run marked as done, so a later Stop of the same turn does not send them again.
+  # PB_FORWARD_IMAGES=off turns this off.
+  case "${PB_FORWARD_IMAGES:-on}" in
+    off | OFF | Off | 0 | false | no) ;;
+    *)
+      printf '%s\n' "$LINES" |
+        jq -Rr 'fromjson? | .message.content[]? | objects | select(.type == "tool_use" and .name == "Read") | .input.file_path? | select(type == "string" and test("\\.(png|jpe?g|webp|gif)$"; "i") and (test("[[:cntrl:]]") | not))' 2>/dev/null |
+        awk '!seen[$0]++' | head -3 |
+        while IFS= read -r IMAGE; do
+          [ -f "$IMAGE" ] && "${AGENT_BIN:-agent}" send-file -- "$IMAGE" < /dev/null > /dev/null 2>&1 || true
+        done
+      ;;
+  esac
+fi
 exit 0

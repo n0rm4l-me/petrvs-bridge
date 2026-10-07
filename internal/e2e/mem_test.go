@@ -499,8 +499,8 @@ func TestTwoAgentsRoutingAndTags(t *testing.T) {
 	nas.Spool.Add(wire.TypeReply, "from the nas")
 	r.WaitSent("[nas] from the nas")
 	r.Say("/agents")
-	r.WaitSent("laptop: online")
-	r.WaitSent("nas: online")
+	r.WaitSent("laptop — online")
+	r.WaitSent("nas — online")
 }
 
 func TestAgentsCannotReadOrActForEachOther(t *testing.T) {
