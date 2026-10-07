@@ -1,5 +1,22 @@
 # Linux: a user service for the agent. NOT YET RUN. Copy to ~/.config/systemd/user/, edit, then:
 #   systemctl --user daemon-reload && systemctl --user enable --now petrvs-bridge-agent
+#
+# The agent reads its settings (PB_NAME, PB_IDENTITY, PB_HUB_PUB, PB_PROJECT, ...) from the EnvironmentFile below.
+#
+# Do NOT add PrivateTmp=true (or any other option that gives the service its own /tmp): tmux keeps its
+# socket in /tmp/tmux-UID/default, so a private, empty /tmp makes every tmux call fail with "no server running" while the
+# agent still handshakes and sends heartbeats, and it also hides the X11 socket (/tmp/.X11-unix) that the idle sensor of the
+# alarm needs. To keep tmux's socket somewhere else on purpose, start the tmux server with TMUX_TMPDIR=DIR set and set the
+# same TMUX_TMPDIR=DIR for the agent (in agent.env); nothing else finds the socket.
+# The idle sensor (xprintidle) also needs DISPLAY and XAUTHORITY of your desktop session in agent.env.
+#
+# PATH: when auto-heal (PB_HEAL) or /continue has to start Claude Code after a reboot, there is no tmux server yet, so the
+# agent starts one, and that server, and everything it runs, inherits the environment of this unit. A user unit has a
+# short PATH (usually without ~/.local/bin or the directory of a node version manager), so Claude Code would fail to start
+# with "command not found", or `claude` would start and find no `node`. Either the PATH of this unit must reach both
+# `claude` and `node` (the Environment=PATH line below), or PB_CLAUDE_COMMAND must be an absolute path and the `node`
+# that `claude` needs must still be on PATH. Check with: systemctl --user show-environment | grep ^PATH
+
 [Unit]
 Description=petrvs-bridge agent
 After=network-online.target
@@ -7,10 +24,36 @@ After=network-online.target
 [Service]
 ExecStart=%h/.local/bin/agent run
 EnvironmentFile=%h/.config/petrvs-bridge/agent.env
+# Where the agent keeps the spool, the lock and the alarm state. This is also the agent's default; it is written out here
+# because the Claude Code Stop hook (examples/claude-stop-hook.sh) runs `agent send` outside this service and must use
+# the SAME directory, or the answers it queues are never picked up: export the same PB_STATE_DIR where the hook runs if you
+# change it. A value in agent.env overrides this line.
+Environment=PB_STATE_DIR=%h/.local/state/petrvs-bridge
+# The directories of `claude` and `node`, see PATH above. Adjust, and keep /usr/bin: tmux is found there.
+#Environment=PATH=%h/.local/bin:%h/.nvm/versions/node/v22.0.0/bin:/usr/local/bin:/usr/bin:/bin
+#
+# Settings that are new or often changed (they can also go into agent.env; README.md lists all of them):
+# The directory Claude Code runs in; auto-heal and /continue start it there, and the inbox for files from the chat is below it.
+#Environment=PB_WORKDIR=%h/project
+# Start Claude Code again when it has stopped or its tmux session is gone (needs PB_WORKDIR).
+#Environment=PB_HEAL=true
+# What auto-heal and /continue run to start Claude Code (one line; default "claude --continue"). Quote it when it has spaces.
+#Environment="PB_CLAUDE_COMMAND=%h/.local/bin/claude --continue"
+# Where files from the chat are saved; default .petrvs-inbox in PB_WORKDIR, else inbox in the state directory.
+#Environment=PB_INBOX_DIR=%h/project/.petrvs-inbox
+# Tell the chat when a request has had no reply for this long (default 10m; 0 or off turns it off).
+#Environment=PB_STUCK_AFTER=10m
+#
+# tmux started by auto-heal or /continue lives in the cgroup of this unit, and the default KillMode=control-group would kill
+# it, and Claude Code with it, whenever the unit stops: on `systemctl --user restart` or `stop` and when the agent crashes
+# and is restarted. With KillMode=process only the agent is stopped and the session survives. (Log out and the user manager
+# ends the session with its units; enable lingering with `loginctl enable-linger $USER` if the session has to outlive that.)
+KillMode=process
 Restart=always
 RestartSec=5
+# The agent exits with status 2 when its configuration is wrong; restarting every 5 s cannot fix that.
+RestartPreventExitStatus=2
 NoNewPrivileges=true
-PrivateTmp=true
 
 [Install]
 WantedBy=default.target

@@ -14,7 +14,9 @@ pubsub:
   prefix: pb            # the resources are called PREFIX-to-hub, PREFIX-hub, PREFIX-to-agent-NAME, PREFIX-agent-NAME
 
 hub:
-  chatId: ""            # required: the only chat that is obeyed (a string, so that a long number stays exact)
+  # Both ids must be QUOTED strings, for example "123456789", or "-1001234567890" for a group: a bare number in a values
+  # file becomes a float and would be rendered as 1.23456789e+08 (values.schema.json refuses it). With --set use --set-string.
+  chatId: ""            # required: the only chat that is obeyed
   userId: ""            # the only user that is obeyed; empty means the chat id
   defaultAgent: ""      # the agent that gets plain text until you choose one; empty: the hub asks first when it has several
   deliveredReaction: "👍" # replaces it once the agent has typed the text into its session; "off" keeps the first one
@@ -25,6 +27,11 @@ hub:
   keyTTL: ""            # 1m by default
   maxReplyBytes: ""
   extraEnv: []          # more environment variables, in the Kubernetes {name, value} form
+  # The hub's lockdown (/lockdown) is kept in a file on an emptyDir. That survives a restart of the container but NOT a new
+  # pod: a helm upgrade that changes the pod (a new image, a changed agent list), a node drain or an eviction makes one,
+  # and with the Recreate strategy the new hub always starts unlocked, without saying so in the chat. To keep the lockdown
+  # across pods, mount a small PersistentVolumeClaim at /state instead of the emptyDir (templates/deployment.yaml, volume
+  # "state"; see docs/DEPLOY.md).
 
 secrets:
   botToken:
@@ -36,6 +43,7 @@ secrets:
 
 agents:
   # The agents that may connect: one NAME.pub.json per agent (public bundles, not secret). Either give them here ...
+  # (every key must be called NAME.pub.json: the hub reads only *.pub.json files; values.schema.json checks it)
   files: {}
   #   laptop.pub.json: |
   #     {...}

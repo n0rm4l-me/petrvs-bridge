@@ -11,12 +11,20 @@ talks to Pub/Sub.
 ```sh
 gcloud artifacts repositories create bridge --repository-format=docker --location=REGION
 gcloud auth configure-docker REGION-docker.pkg.dev
-docker build -f deploy/hub.Dockerfile -t REGION-docker.pkg.dev/PROJECT/bridge/petrvs-bridge-hub:0.1.0 .
-docker push REGION-docker.pkg.dev/PROJECT/bridge/petrvs-bridge-hub:0.1.0
+docker buildx build --platform linux/amd64 -f deploy/hub.Dockerfile \
+  -t REGION-docker.pkg.dev/PROJECT/bridge/petrvs-bridge-hub:0.1.0 --push .
 ```
 
+Always give `--platform`. Without it the image is built for the machine that builds it: on an Apple silicon Mac that is
+`linux/arm64`, and the pod of an amd64 node then crash-loops with `exec format error`. Use `linux/amd64` for the usual GKE
+nodes and `linux/arm64` for arm nodes (Tau T2A, Axion); `--platform linux/amd64,linux/arm64` makes one image for both. The
+Go stage of the Dockerfile cross-compiles, so no emulation is needed. The Dockerfile needs BuildKit (`docker buildx`
+always has it). The build stage sets `GOTOOLCHAIN=auto`, because the official `golang` image sets `local` and would
+refuse `go.mod` when its own Go is older than the `go` line there.
+
 Without Docker on the machine: `gcloud builds submit --config deploy/cloudbuild.yaml --substitutions _IMAGE=... .` (this
-uploads the source to Google Cloud Storage). Use the image's digest (`sha256:...`) in the chart, not a moving tag.
+uploads the source to Google Cloud Storage; `_PLATFORM`, default `linux/amd64`, sets the platform). Use the image's digest
+(`sha256:...`) in the chart, not a moving tag.
 
 ## 2. Pub/Sub
 
@@ -75,7 +83,27 @@ agents:
       { ...the contents of keys/laptop.pub.json... }
 ```
 
+Keep the ids in quotes (`"123456789"`, and `"-1001234567890"` for a group; with `--set` use `--set-string`): an unquoted
+number is read by Helm as a float and would reach the hub as `1.23456789e+08`. Every key under `agents.files` must be called
+`NAME.pub.json`, because the hub reads only those files. The chart's `values.schema.json` refuses both mistakes when you run
+`helm lint`, `template` or `install`.
+
+The hub logs JSON lines on standard output with the fields `severity` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) and `message`,
+which Cloud Logging reads on GKE, so a log-based alert on `severity>=ERROR` works. They never contain message text or tokens.
+
+When the hub is stopped (an upgrade, a drain) it makes one last Telegram call of at most 2 s to confirm the updates it has handled, so that its successor does not type them again; Kubernetes' default 30 s grace period is ample.
+
 Only one replica may run. The chart fixes that, because two hubs would fight over one bot.
+
+**The lockdown does not survive a new pod.** The hub keeps `/lockdown` in a file (`PB_LOCK_FILE`), and the chart puts
+that file on an `emptyDir`. An `emptyDir` survives a restart of the container but not a replacement of the pod, and a
+`helm upgrade` that changes the pod (a new image, a changed `agents.files`), a node drain and an eviction all replace
+it. With the `Recreate` strategy the new hub then always starts unlocked, and says nothing in the chat; an agent that
+was offline when the lockdown was ordered never heard it, and the hub relays to it again. If a lockdown was on, send
+`/lockdown` again after such an event (it is safe to repeat). To keep it across pods, back the `state` volume with a
+small PersistentVolumeClaim (a few KiB, `ReadWriteOnce`) instead of the `emptyDir` in `templates/deployment.yaml`;
+`Recreate` already makes sure two pods never hold the volume at once. The chart has no value for this yet. Run as a
+plain binary without `PB_LOCK_FILE`, the hub forgets a lockdown on every restart.
 
 ## 6. The agent
 

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "petrvs-bridge-hub values (the parts that fail silently when they are wrong)",
+  "type": "object",
+  "properties": {
+    "hub": {
+      "type": "object",
+      "properties": {
+        "chatId": {
+          "type": "string",
+          "pattern": "^(-?[0-9]+)?$",
+          "description": "The only chat that is obeyed. Give it as a quoted string, for example \"123456789\" or \"-1001234567890\" for a group: a number in a values file is read as a float and rendered as 1.23456789e+08, which the hub refuses. With --set use --set-string. Empty is accepted here only so that the default values are valid; the template requires it."
+        },
+        "userId": {
+          "type": "string",
+          "pattern": "^(-?[0-9]+)?$",
+          "description": "The only user that is obeyed, as a quoted string. Empty means the chat id."
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "object",
+          "description": "One NAME.pub.json per agent that may connect. The hub reads only files called *.pub.json; any other key would leave it with no agents.",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*\\.pub\\.json$"
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

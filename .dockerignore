@@ -1,7 +1,30 @@
+# What `docker build` and `gcloud builds submit` send as the build context. The build needs only go.mod, go.sum, cmd/ and
+# internal/; keep everything else, above all keys and secrets, out of the builder layer and out of the upload.
+# (Patterns here are relative to the root of the context: use **/ to match at any depth.)
 .git
 .github
+.claude
 bin
 coverage.out
 docs
 examples
 deploy/helm
+
+# Keys, secrets and credentials that the README's quick start or a deployment creates next to the code.
+keys
+agents
+**/*.identity.json
+**/*.key
+**/*.pem
+**/*.p12
+**/.env
+**/.env.*
+**/*.secret
+**/alarm-secret*
+**/*.token
+**/*-sa.json
+**/*sa-key*.json
+**/*service-account*.json
+**/application_default_credentials.json
+**/client_secret*.json
+**/credentials*.json

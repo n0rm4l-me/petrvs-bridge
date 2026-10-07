@@ -1,5 +1,20 @@
-*.key
-*.identity.json
 /bin/
 /coverage.out
+
+# Keys, secrets and credentials. The README's quick start creates keys/ in the repository root (agents/ holds only public bundles).
+/keys/
+*.identity.json
+*.key
+*.pem
+*.p12
 .env
+.env.*
+*.secret
+alarm-secret*
+*.token
+*-sa.json
+*sa-key*.json
+*service-account*.json
+application_default_credentials.json
+client_secret*.json
+credentials*.json

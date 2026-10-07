@@ -1,8 +1,12 @@
 # Builds the hub image in Google Cloud Build, for a machine without Docker. NOT YET RUN.
 #   gcloud builds submit --config deploy/cloudbuild.yaml --substitutions _IMAGE=REGION-docker.pkg.dev/PROJECT/REPO/petrvs-bridge-hub:0.1.0 .
+# The Dockerfile needs BuildKit (it uses the predefined build platform arguments), hence DOCKER_BUILDKIT=1. The image is
+# built for _PLATFORM; Cloud Build workers are amd64, and the Go stage cross-compiles, so linux/arm64 works too.
 steps:
   - name: gcr.io/cloud-builders/docker
-    args: [build, -f, deploy/hub.Dockerfile, -t, "${_IMAGE}", .]
+    env: ["DOCKER_BUILDKIT=1"]
+    args: [build, --platform, "${_PLATFORM}", -f, deploy/hub.Dockerfile, -t, "${_IMAGE}", .]
 images: ["${_IMAGE}"]
 substitutions:
   _IMAGE: REGION-docker.pkg.dev/PROJECT/REPO/petrvs-bridge-hub:0.1.0
+  _PLATFORM: linux/amd64

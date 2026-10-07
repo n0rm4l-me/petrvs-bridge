@@ -7,6 +7,10 @@ metadata:
     {{- include "hub.labels" . | nindent 4 }}
 data:
   {{- range $file, $content := .Values.agents.files }}
+  {{- /* values.schema.json checks this first; the hub reads only *.pub.json, so another name would leave it with no agents */}}
+  {{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9_-]*\\.pub\\.json$" $file) }}
+  {{- fail (printf "agents.files: %q must be called NAME.pub.json (the hub reads only *.pub.json files)" $file) }}
+  {{- end }}
   {{ $file }}: |
     {{- $content | nindent 4 }}
   {{- end }}

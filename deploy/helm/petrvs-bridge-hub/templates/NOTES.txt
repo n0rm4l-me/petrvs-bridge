@@ -14,4 +14,9 @@ Before it can work, these must exist:
 3. Access for the hub's service account {{ include "hub.serviceAccountName" . }}: publisher on each agent topic and
    subscriber on {{ .Values.pubsub.prefix }}-hub.
 
+Mind this: the hub's lockdown (/lockdown) is kept on an emptyDir. It survives a restarted container but not a new pod
+(a helm upgrade that changes the pod, such as a new image or agent list, a node drain, an eviction), and the new hub then
+starts unlocked without saying so. If a lockdown was on, send /lockdown again after any of those (it is safe to repeat),
+or keep the file on a small PersistentVolumeClaim. See docs/DEPLOY.md.
+
 Check the hub with:  kubectl logs deploy/{{ include "hub.fullname" . }}

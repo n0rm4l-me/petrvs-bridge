@@ -2,7 +2,30 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- macOS: keeps the agent running and restarts it if it dies.
      Copy to ~/Library/LaunchAgents/, edit the paths, then: launchctl load ~/Library/LaunchAgents/com.example.petrvs-bridge-agent.plist
-     Logs go to the files below; they never contain message text. -->
+     Logs go to the files below; they never contain message text.
+
+     PATH: launchd starts the agent with PATH=/usr/bin:/bin:/usr/sbin:/sbin, where a Homebrew tmux is not found
+     (/opt/homebrew/bin on Apple silicon, /usr/local/bin on Intel), and the agent would look healthy while every tmux call
+     fails with "executable file not found". Keep the directory of your tmux first in PATH below (`command -v tmux`).
+
+     TMUX_TMPDIR: tmux keeps its socket in $TMUX_TMPDIR/tmux-UID/default, and in /tmp/tmux-UID/default when the variable is
+     not set. A launchd agent sees the same /tmp as your shell, so the default works. If you start tmux with TMUX_TMPDIR
+     set, add the same TMUX_TMPDIR key below, or the agent will not find your session.
+
+     PB_STATE_DIR: written out because the Claude Code Stop hook (examples/claude-stop-hook.sh) runs `agent send` in your
+     own shell and must use the SAME directory as the agent, or the answers it queues are never picked up. The default on
+     macOS is ~/.local/state/petrvs-bridge (when XDG_STATE_HOME is not set); if you change it here, export the same
+     PB_STATE_DIR where the hook runs.
+
+     PATH and Claude Code: when auto-heal (PB_HEAL) or /continue has to start Claude Code, for example after a reboot when
+     no tmux server runs yet, the agent starts the tmux server, and that server, and everything it runs, inherits the
+     environment of this agent. So the PATH below must reach both `claude` and `node` (a Claude Code installed with npm
+     is a Node script and needs `node`; put the directory of your node version manager in PATH if you use one), or
+     PB_CLAUDE_COMMAND must be an absolute path (and `node` must still be found if `claude` is a Node script). Otherwise
+     the session comes back as a shell that says "command not found". Check with `command -v claude node`.
+
+     The commented-out keys in the dict below are the newer settings, all off or at their defaults; README.md lists them
+     all. Remove the comment marks around a key to use it. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.example.petrvs-bridge-agent</string>
@@ -10,12 +33,24 @@
   <array><string>/usr/local/bin/agent</string><string>run</string></array>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>PB_NAME</key><string>laptop</string>
     <key>PB_PROJECT</key><string>YOUR_PROJECT</string>
     <key>PB_IDENTITY</key><string>/Users/YOU/.config/petrvs-bridge/laptop.identity.json</string>
     <key>PB_HUB_PUB</key><string>/Users/YOU/.config/petrvs-bridge/hub.pub.json</string>
     <key>PB_TMUX_SESSION</key><string>claude</string>
+    <key>PB_STATE_DIR</key><string>/Users/YOU/.local/state/petrvs-bridge</string>
     <key>GOOGLE_APPLICATION_CREDENTIALS</key><string>/Users/YOU/.config/petrvs-bridge/agent-sa.json</string>
+    <!-- PB_WORKDIR: the directory Claude Code runs in; auto-heal and /continue start it there, and the inbox for files from the chat is below it. -->
+    <!-- <key>PB_WORKDIR</key><string>/Users/YOU/project</string> -->
+    <!-- PB_HEAL: start Claude Code again when it has stopped or its tmux session is gone (needs PB_WORKDIR). -->
+    <!-- <key>PB_HEAL</key><string>true</string> -->
+    <!-- PB_CLAUDE_COMMAND: what auto-heal and /continue run to start Claude Code, one line; the default is claude with its continue flag (-c is the short form). -->
+    <!-- <key>PB_CLAUDE_COMMAND</key><string>/Users/YOU/.local/bin/claude -c</string> -->
+    <!-- PB_INBOX_DIR: where files from the chat are saved; the default is .petrvs-inbox in PB_WORKDIR, else inbox in the state directory. -->
+    <!-- <key>PB_INBOX_DIR</key><string>/Users/YOU/project/.petrvs-inbox</string> -->
+    <!-- PB_STUCK_AFTER: tell the chat when a request has had no reply for this long (default 10m; 0 or off turns it off). -->
+    <!-- <key>PB_STUCK_AFTER</key><string>10m</string> -->
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
