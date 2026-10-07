@@ -15,12 +15,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/n0rm4l-me/petrvs-bridge/internal/handshake"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
@@ -49,7 +51,14 @@ type Config struct {
 	HelloMinInterval time.Duration // default 3s per agent
 	PollTimeout      time.Duration // default 25s
 	MenuRetry        time.Duration // first wait before publishing the command menu again after a failure, default 5s
-	MaxReplyBytes    int           // default 20000
+	// MaxFileBytes bounds a file in either direction (default filetx.DefaultMaxBytes).
+	MaxFileBytes int64
+	// MinTurn is the least time between two batches of parts of a file sent to one agent (default 250ms): the agent's
+	// ratchet takes a limited number of new keys a second, and every batch and the answers to it cost one at each end.
+	// Negative turns the pacing off (tests with a clock that does not move).
+	MinTurn        time.Duration
+	LockdownResend time.Duration // least time between two lockdowns sent to an agent that reports itself unlocked, default 10s
+	MaxReplyBytes  int           // default 20000
 	// DefaultAgent is where plain text goes until the user picks an agent. With several agents and no default, the hub
 	// asks first instead of guessing, so that an answer typed after a hub restart cannot end up on the wrong machine.
 	// With a single agent that agent is always the active one.
@@ -90,6 +99,8 @@ type agentState struct {
 	offlineNotice bool
 	info          map[string]string
 	everConnected bool
+	lockSent      time.Time           // when a lockdown was last sent to this agent
+	inflight      map[string]struct{} // ids of replies that are being written to the chat right now
 }
 
 // Hub is the server service.
@@ -119,6 +130,12 @@ type Hub struct {
 	msgRing  []int64
 
 	unauthorized, rejected, hellos, hellosRefused, relayed atomic.Uint64
+
+	// The state of the parts beyond relaying text; each has its own file (hub_up.go, hub_down.go, hub_ui.go, hub_mach.go).
+	up   upState
+	down downState
+	ui   uiState
+	mach machState
 }
 
 // New validates the configuration and returns a hub.
@@ -150,6 +167,7 @@ func New(cfg Config) (*Hub, error) {
 	def(&cfg.HelloMinInterval, 3*time.Second)
 	def(&cfg.PollTimeout, 25*time.Second)
 	def(&cfg.MenuRetry, 5*time.Second)
+	def(&cfg.LockdownResend, 10*time.Second)
 	if cfg.MaxReplyBytes <= 0 {
 		cfg.MaxReplyBytes = 20000
 	}
@@ -158,8 +176,14 @@ func New(cfg Config) (*Hub, error) {
 		h.reactQ = make(chan mark, maxMarksQueued)
 	}
 	if cfg.LockFile != "" {
-		if _, err := os.Stat(cfg.LockFile); err == nil {
-			h.locked = true // a lockdown survives a restart; only /unlock ends it
+		// A lockdown survives a restart; only /unlock ends it. A lock file that cannot be checked counts as there: the
+		// hub fails closed, like the agent does.
+		switch _, err := os.Stat(cfg.LockFile); {
+		case err == nil:
+			h.locked = true
+		case !errors.Is(err, os.ErrNotExist):
+			h.locked = true
+			h.log.Warn("could not check the hub's lock file, so the hub starts locked down until /unlock", "err", err)
 		}
 	}
 	for _, p := range cfg.Agents {
@@ -169,7 +193,7 @@ func New(cfg Config) (*Hub, error) {
 		if _, dup := h.agents[p.Name]; dup {
 			return nil, fmt.Errorf("hubsvc: agent %q pinned twice", p.Name)
 		}
-		h.agents[p.Name] = &agentState{pub: p, seenIDs: map[string]struct{}{}}
+		h.agents[p.Name] = &agentState{pub: p, seenIDs: map[string]struct{}{}, inflight: map[string]struct{}{}}
 	}
 	names := h.agentNames()
 	switch {
@@ -181,6 +205,7 @@ func New(cfg Config) (*Hub, error) {
 	case len(names) == 1:
 		h.active = names[0]
 	}
+	h.initExt()
 	return h, nil
 }
 
@@ -223,8 +248,12 @@ func (h *Hub) Run(ctx context.Context) error {
 	if h.reactQ != nil {
 		go h.markLoop(ctx)
 	}
-	go h.telegramLoop(ctx)
+	loopDone := make(chan struct{})
+	go func() { h.telegramLoop(ctx); close(loopDone) }()
 	go h.watchLoop(ctx)
+	// Run returns only after the chat loop has told Telegram how far it read, so that a hub started right after this one
+	// does not get the same updates again.
+	defer func() { cancel(); <-loopDone }()
 	select {
 	case <-ctx.Done():
 		return nil
@@ -247,7 +276,10 @@ var menu = []telegram.Command{
 	{Name: "help", Description: "List of commands"},
 }
 
-const helpText = "Known: /agents /agent [NAME] /enter /esc /up /down /tab /key N /alarm on|off|status /lockdown /unlock, @name text (also @name /enter), or answer a message of an agent to write to that agent."
+const baseHelp = "Known: /agents /agent [NAME] /enter /esc /up /down /tab /key N|btab /alarm on|off|status /lockdown /unlock"
+
+// helpText is the whole list: the base commands, the chat commands and the machine commands, then how to address an agent.
+var helpText = baseHelp + chatHelp + machineHelp + ", @name text (also @name /enter), or answer a message of an agent to write to that agent."
 
 // publishMenu shows the commands in the chat's "/" menu. A failure is not fatal (the commands work without the menu);
 // it is tried again with growing waits until it works.
@@ -258,7 +290,7 @@ func (h *Hub) publishMenu(ctx context.Context) {
 	}
 	wait := h.cfg.MenuRetry
 	for ctx.Err() == nil {
-		err := m.SetCommands(ctx, menu)
+		err := m.SetCommands(ctx, fullMenu())
 		if err == nil {
 			return
 		}
@@ -325,6 +357,13 @@ func (h *Hub) rememberCommand(agent, commandID string, messageID int64) {
 	}
 }
 
+// forgetCommand drops a command that turned out not to have been sent.
+func (h *Hub) forgetCommand(commandID string) {
+	h.mu.Lock()
+	delete(h.cmdMsg, commandID)
+	h.mu.Unlock()
+}
+
 // markDelivered puts the delivered mark on the message a command came from, when the agent that got the command says it
 // carried it out. A report from another agent, or about an unknown command, changes nothing.
 func (h *Hub) markDelivered(agent, commandID string) {
@@ -376,7 +415,11 @@ func (h *Hub) sayErr(ctx context.Context, text string) error {
 // send writes to the chat, cutting a text that is too long, and returns the ids of what was sent.
 func (h *Hub) send(ctx context.Context, m telegram.Message) ([]int64, error) {
 	if len(m.Text) > h.cfg.MaxReplyBytes {
-		m.Text = m.Text[:h.cfg.MaxReplyBytes] + fmt.Sprintf("\n[cut: %d more bytes]", len(m.Text)-h.cfg.MaxReplyBytes)
+		cut := h.cfg.MaxReplyBytes
+		for cut > 0 && !utf8.RuneStart(m.Text[cut]) { // not in the middle of a character
+			cut--
+		}
+		m.Text = m.Text[:cut] + fmt.Sprintf("\n[cut: %d more bytes]", len(m.Text)-cut)
 	}
 	ids, err := h.cfg.Telegram.SendMessage(ctx, h.cfg.ChatID, m)
 	switch {
@@ -391,8 +434,16 @@ func (h *Hub) send(ctx context.Context, m telegram.Message) ([]int64, error) {
 // sayAs writes something that an agent said, or that is about one, and remembers it: a reply to that message in the
 // chat is then sent to that agent.
 func (h *Hub) sayAs(ctx context.Context, agent, text string) error {
-	ids, err := h.send(ctx, telegram.Message{Text: text})
+	return h.sayMessage(ctx, agent, telegram.Message{Text: text})
+}
+
+// sayMessage is sayAs for a message with buttons.
+func (h *Hub) sayMessage(ctx context.Context, agent string, m telegram.Message) error {
+	ids, err := h.send(ctx, m)
 	h.track(agent, ids)
+	if len(m.Buttons) > 0 {
+		h.ui.noteButtons(ids, h.cfg.Now()) // taps are obeyed for a while only, see tapExtra
+	}
 	return err
 }
 
@@ -427,6 +478,19 @@ func (h *Hub) agentOfMessage(id int64) string {
 	return h.msgAgent[id]
 }
 
+// reply says what a chat message answers: the agent whose message it is, or unknown when it answers a message that the
+// hub does not remember (it was restarted, or the message is older than the last maxTrackedMessages).
+type reply struct {
+	agent   string
+	unknown bool
+}
+
+// replyOf looks up the message a swipe-reply answers; replyToID is 0 when the message answers none.
+func (h *Hub) replyOf(replyToID int64) reply {
+	agent := h.agentOfMessage(replyToID)
+	return reply{agent: agent, unknown: replyToID != 0 && agent == ""}
+}
+
 func (h *Hub) tag(name string) string {
 	if len(h.agents) > 1 {
 		return "[" + name + "] "
@@ -438,6 +502,9 @@ func (h *Hub) tag(name string) string {
 
 func (h *Hub) telegramLoop(ctx context.Context) {
 	var offset int64
+	// Telegram drops an update only when a later poll asks for a higher offset, so what was handled since the last poll
+	// is confirmed here; without it the next process would be given the same updates again.
+	defer func() { h.confirmUpdates(offset) }()
 	backoff := time.Second
 	for ctx.Err() == nil {
 		ups, err := h.cfg.Telegram.GetUpdates(ctx, offset, h.cfg.PollTimeout)
@@ -445,9 +512,14 @@ func (h *Hub) telegramLoop(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			h.log.Warn("polling failed", "err", err, "retry_in", backoff)
+			wait := backoff
+			var rl telegram.ErrRateLimited
+			if errors.As(err, &rl) && rl.After > wait {
+				wait = rl.After // Telegram said how long to stay away
+			}
+			h.log.Warn("polling failed", "err", err, "retry_in", wait)
 			select {
-			case <-time.After(backoff):
+			case <-time.After(wait):
 			case <-ctx.Done():
 				return
 			}
@@ -458,10 +530,13 @@ func (h *Hub) telegramLoop(ctx context.Context) {
 		}
 		backoff = time.Second
 		for _, u := range ups {
+			if ctx.Err() != nil {
+				return // not started, so not confirmed: the next process handles it
+			}
 			if u.ID >= offset {
 				offset = u.ID + 1
 			}
-			if u.Text == "" && u.CallbackID == "" {
+			if u.Text == "" && u.CallbackID == "" && u.Media == nil {
 				continue
 			}
 			if u.ChatID != h.cfg.ChatID || u.UserID != h.cfg.UserID {
@@ -472,9 +547,27 @@ func (h *Hub) telegramLoop(ctx context.Context) {
 				h.tap(ctx, u)
 				continue
 			}
+			if u.Media != nil {
+				h.markReceived(u.MessageID)
+				h.onMedia(ctx, u)
+				continue
+			}
 			h.markReceived(u.MessageID)
-			h.handleTo(ctx, u.Text, u.Date, h.agentOfMessage(u.ReplyToID), u.MessageID)
+			h.handleTo(ctx, u.Text, u.Date, h.replyOf(u.ReplyToID), u.MessageID)
 		}
+	}
+}
+
+// confirmUpdates asks Telegram once more, with the offset the loop has reached and no waiting, so that it forgets the
+// updates up to there. It uses a context of its own because it runs when the hub's is already done.
+func (h *Hub) confirmUpdates(offset int64) {
+	if offset == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := h.cfg.Telegram.GetUpdates(ctx, offset, 0); err != nil {
+		h.log.Warn("could not confirm the handled chat updates; the next start may see them again", "err", err)
 	}
 }
 
@@ -509,19 +602,19 @@ func (h *Hub) stale(sentAt time.Time, ttl time.Duration) bool {
 }
 
 func (h *Hub) handle(ctx context.Context, text string, sentAt time.Time) {
-	h.handleTo(ctx, text, sentAt, "", 0)
+	h.handleTo(ctx, text, sentAt, reply{}, 0)
 }
 
 // targeted says whether a command acts on one agent (as opposed to the hub itself).
 func targeted(cmd string) bool {
 	_, isKey := keyCommands[cmd]
-	return isKey || cmd == "/key" || cmd == "/alarm"
+	return isKey || cmd == "/key" || cmd == "/alarm" || chatTargeted(cmd) || machineTargeted(cmd)
 }
 
-// handleTo interprets one message. replyTo is the agent whose message this one answers in the chat, "" when it
-// answers none; it decides where text and key commands go, unless the message names an agent itself with @name.
-// msgID is the id of the chat message (0 when unknown); it lets the hub mark that message as delivered later.
-func (h *Hub) handleTo(ctx context.Context, text string, sentAt time.Time, replyTo string, msgID int64) {
+// handleTo interprets one message. re says which message this one answers in the chat; it decides where text and key
+// commands go, unless the message names an agent itself with @name. msgID is the id of the chat message (0 when
+// unknown); it lets the hub mark that message as delivered later.
+func (h *Hub) handleTo(ctx context.Context, text string, sentAt time.Time, re reply, msgID int64) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
@@ -533,9 +626,10 @@ func (h *Hub) handleTo(ctx context.Context, text string, sentAt time.Time, reply
 			h.say(ctx, "Use @name text, with the name of a known agent. /agents lists them.")
 			return
 		}
-		// "@name /enter" presses the key on that agent. Any other text, also one that starts with a slash (an
-		// assistant's own command such as /compact), is typed as it is.
-		if word, arg, _ := strings.Cut(rest, " "); targeted(strings.ToLower(word)) {
+		// "@name /enter", "@name /stop", "@name /clear" and the other commands the hub knows (targeted) act on that
+		// agent. Any other text, also one that starts with a slash the hub does not know (an assistant's own command such
+		// as /review), is typed as it is.
+		if word, arg, _ := strings.Cut(rest, " "); targeted(strings.ToLower(word)) || machineAtName(strings.ToLower(word)) {
 			h.runTargeted(ctx, name, strings.ToLower(word), strings.TrimSpace(arg), sentAt, msgID)
 			return
 		}
@@ -543,7 +637,7 @@ func (h *Hub) handleTo(ctx context.Context, text string, sentAt time.Time, reply
 		return
 	}
 	if !strings.HasPrefix(text, "/") {
-		if agent, ok := h.destination(ctx, replyTo); ok {
+		if agent, ok := h.destination(ctx, re); ok {
 			h.deliver(ctx, agent, wire.TypeText, text, h.cfg.TextTTL, sentAt, msgID)
 		}
 		return
@@ -552,7 +646,7 @@ func (h *Hub) handleTo(ctx context.Context, text string, sentAt time.Time, reply
 	arg = strings.TrimSpace(arg)
 	cmd = strings.ToLower(cmd)
 	if targeted(cmd) {
-		if agent, ok := h.destination(ctx, replyTo); ok {
+		if agent, ok := h.destination(ctx, re); ok {
 			h.runTargeted(ctx, agent, cmd, arg, sentAt, msgID)
 		}
 		return
@@ -594,8 +688,21 @@ func (h *Hub) handleTo(ctx context.Context, text string, sentAt time.Time, reply
 	case "/start", "/help":
 		h.say(ctx, helpText)
 	default:
+		if h.chatCommand(ctx, cmd, arg, re, sentAt, msgID) || h.machineCommand(ctx, cmd, arg, re, sentAt, msgID) {
+			return
+		}
 		h.say(ctx, "Unknown command. "+helpText)
 	}
+}
+
+// canonicalKey gives the ways people write Shift+Tab the one name the agent accepts. Anything else goes as typed and the
+// agent judges it against its allow-list.
+func canonicalKey(arg string) string {
+	switch strings.ToLower(strings.TrimSpace(arg)) {
+	case "btab", "shift+tab", "shift-tab":
+		return "BTab"
+	}
+	return arg
 }
 
 // runTargeted carries out a key press or an alarm command on one agent.
@@ -606,25 +713,44 @@ func (h *Hub) runTargeted(ctx context.Context, agent, cmd, arg string, sentAt ti
 	}
 	switch cmd {
 	case "/key":
-		h.deliver(ctx, agent, wire.TypeKey, arg, h.cfg.KeyTTL, sentAt, msgID)
+		key := canonicalKey(arg)
+		if key == "BTab" {
+			// Shift+Tab changes Claude Code's permission mode, which decides what it may do without asking: leave a trace.
+			h.log.Info("permission mode key requested from the chat", "agent", agent, "key", key)
+		}
+		h.deliverWith(ctx, agent, wire.TypeKey, key, keyMeta(key), h.cfg.KeyTTL, sentAt, msgID)
 	case "/alarm":
 		if arg == "" {
 			arg = "status"
 		}
 		h.deliver(ctx, agent, wire.TypeAlarm, arg, h.cfg.KeyTTL, sentAt, 0)
+	default:
+		switch {
+		case chatTargeted(cmd): // /stop, /screen, /clear ... with @name, a swipe-reply or the active agent
+			h.runChat(ctx, agent, cmd, arg, sentAt, msgID)
+		case machineAtName(cmd): // @name /continue
+			h.startOn(ctx, agent, sentAt, msgID)
+		}
 	}
 }
 
 // destination decides which agent a message without @name goes to: the one whose message it answers, else the active
-// one. With several agents and none active it asks the user to choose and reports false, so nothing is sent.
-func (h *Hub) destination(ctx context.Context, replyTo string) (string, bool) {
+// one. With several agents and none active it asks the user to choose and reports false, so nothing is sent. Nor is
+// anything sent when the message answers one the hub has forgotten and there are several agents: the author may be any
+// of them, and the active one is a guess.
+func (h *Hub) destination(ctx context.Context, re reply) (string, bool) {
 	active := h.activeName()
-	if replyTo != "" {
-		if replyTo != active {
-			h.say(ctx, "→ "+replyTo+" (you answered its message)")
+	if re.agent != "" {
+		if re.agent != active {
+			h.say(ctx, "→ "+re.agent+" (you answered its message)")
 		}
-		h.log.Debug("destination", "agent", replyTo, "via", "reply", "active", active)
-		return replyTo, true
+		h.log.Debug("destination", "agent", re.agent, "via", "reply", "active", active)
+		return re.agent, true
+	}
+	if re.unknown && len(h.agents) > 1 {
+		h.log.Debug("destination", "agent", "", "via", "reply to an unknown message")
+		h.say(ctx, "The hub no longer knows which agent wrote the message you answered, so nothing was sent. Write @name text, or choose an agent with /agent.")
+		return "", false
 	}
 	if active == "" {
 		h.log.Debug("destination", "agent", "", "via", "none chosen")
@@ -682,6 +808,9 @@ func (h *Hub) tap(ctx context.Context, u telegram.Update) {
 			h.log.Warn("could not answer a button press", "err", err)
 		}
 	}
+	if h.tapExtra(ctx, u, answer) {
+		return
+	}
 	name, ok := strings.CutPrefix(u.CallbackData, agentPrefix)
 	if !ok {
 		answer("")
@@ -709,42 +838,35 @@ func (h *Hub) activeName() string {
 	return h.active
 }
 
+// statusText is the card of each agent (see renderCard), then what concerns the hub itself.
 func (h *Hub) statusText() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := h.cfg.Now()
-	var b strings.Builder
+	var cards []string
 	for _, n := range h.agentNames() {
 		st := h.agents[n]
-		mark := " "
-		if n == h.active {
-			mark = "*"
-		}
-		state := "never connected"
+		c := cardAgent{name: n, marked: len(h.agents) > 1 && n == h.active, silent: now.Sub(st.lastSeen), info: st.info}
 		switch {
-		case st.cur != nil && now.Sub(st.lastSeen) < h.cfg.OfflineAfter:
-			state = "online"
+		case st.cur != nil && c.silent < h.cfg.OfflineAfter:
+			c.state = cardOnline
 		case st.everConnected:
-			state = "offline, last seen " + now.Sub(st.lastSeen).Round(time.Second).String() + " ago"
+			c.state = cardOffline
 		}
-		fmt.Fprintf(&b, "%s %s: %s", mark, n, state)
-		var keys []string
-		for k := range st.info {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			fmt.Fprintf(&b, ", %s=%s", k, st.info[k])
-		}
-		b.WriteByte('\n')
+		cards = append(cards, renderCard(c))
 	}
+	text := strings.Join(cards, "\n\n")
+	var hub []string
 	if h.active == "" {
-		b.WriteString("No agent is chosen yet: pick one with /agent NAME or the buttons.\n")
+		hub = append(hub, "No agent is chosen yet: pick one with /agent NAME or the buttons.")
 	}
 	if h.locked {
-		b.WriteString("Hub is in lockdown: nothing is relayed.\n")
+		hub = append(hub, "Hub is in lockdown: nothing is relayed.")
 	}
-	return strings.TrimRight(b.String(), "\n")
+	if len(hub) > 0 {
+		text += "\n\n" + strings.Join(hub, "\n")
+	}
+	return text
 }
 
 func newID() string {
@@ -756,13 +878,22 @@ func newID() string {
 // deliver seals a command for one agent and publishes it. The command is valid for ttl from the moment the user typed
 // it (sentAt, or now when that is unknown), so time spent in the chat's queue counts against it.
 func (h *Hub) deliver(ctx context.Context, agent string, t wire.Type, body string, ttl time.Duration, sentAt time.Time, msgID int64) {
+	h.deliverWith(ctx, agent, t, body, nil, ttl, sentAt, msgID)
+}
+
+// deliverWith is deliver with metadata for the payload (the hub adds the command number to it). It reports whether the
+// payload was published; when it did not, the user has been told why.
+func (h *Hub) deliverWith(ctx context.Context, agent string, t wire.Type, body string, meta map[string]string, ttl time.Duration, sentAt time.Time, msgID int64) bool {
+	if h.gateHold(ctx, agent, t, body, meta, ttl, sentAt, msgID) { // a file is on its way to this agent: the command waits behind it
+		return true
+	}
 	now := h.cfg.Now()
 	if sentAt.IsZero() || sentAt.After(now) {
 		sentAt = now
 	}
 	if now.Sub(sentAt) > ttl {
 		h.say(ctx, "⚠️ Ignored a message that was already older than its validity ("+ttl.String()+"). Send it again if you still want it.")
-		return
+		return false
 	}
 	h.mu.Lock()
 	locked := h.locked
@@ -777,45 +908,98 @@ func (h *Hub) deliver(ctx context.Context, agent string, t wire.Type, body strin
 	switch {
 	case locked:
 		h.say(ctx, "Lockdown is on: nothing is sent. /unlock turns the hub's relay back on.")
-		return
+		return false
 	case s == nil:
 		h.say(ctx, "⚠️ "+agent+" is not connected.")
-		return
+		return false
 	case reconnecting:
 		h.say(ctx, "⚠️ "+agent+" is reconnecting. Send it again in a moment.")
-		return
+		return false
 	case silent >= h.cfg.OfflineAfter:
 		// A command that waits for a machine that is away would arrive stale, so say so now instead of queueing it.
 		h.say(ctx, "⚠️ "+agent+" is offline (last heard "+silent.Round(time.Second).String()+" ago). Not sent.")
-		return
+		return false
 	}
 	p := &wire.Payload{ID: newID(), Type: t, Body: body, TS: now.Unix(), Exp: sentAt.Add(ttl).Unix()}
-	if t == wire.TypeText || t == wire.TypeKey {
+	command := wire.IsCommand(t)
+	if len(meta) > 0 {
+		p.Meta = map[string]string{}
+		for k, v := range meta {
+			p.Meta[k] = v
+		}
+	}
+	var n uint64
+	if command {
 		// Commands are numbered so the agent can run them in the order they were typed even if the bus reorders them.
 		h.mu.Lock()
 		s.seq++
-		p.Meta = map[string]string{wire.MetaSeq: strconv.FormatUint(s.seq, 10)}
+		n = s.seq
+		if p.Meta == nil {
+			p.Meta = map[string]string{}
+		}
+		p.Meta[wire.MetaSeq] = strconv.FormatUint(n, 10)
 		h.mu.Unlock()
 	}
 	data, err := wire.Seal(s.r, h.cfg.Identity.Name, agent, s.sid, p)
-	switch {
-	case errors.Is(err, ratchet.ErrNoSendChain):
-		h.say(ctx, "⚠️ "+agent+" is still connecting, try again in a moment.")
-		return
-	case err != nil:
-		h.say(ctx, "⚠️ Could not prepare the message.")
-		return
+	if err != nil {
+		if command { // nothing was sent, so give the number back: a gap would make the agent wait and report a lost command
+			h.mu.Lock()
+			if s.seq == n {
+				s.seq--
+			}
+			h.mu.Unlock()
+		}
+		if errors.Is(err, ratchet.ErrNoSendChain) {
+			h.say(ctx, "⚠️ "+agent+" is still connecting, try again in a moment.")
+		} else {
+			h.say(ctx, "⚠️ Could not prepare the message.")
+		}
+		return false
 	}
-	if err := h.cfg.Transport.Publish(ctx, h.cfg.Names.ToAgent(agent), data, wire.Attrs(wire.KindMsg, agent)); err != nil {
-		h.log.Warn("publish failed", "agent", agent, "err", err)
+	if command {
+		// Before the publish: the agent may report the command done before Publish has returned.
+		h.rememberCommand(agent, p.ID, msgID)
+	}
+	if err := h.publish(ctx, agent, data); err != nil {
+		h.forgetCommand(p.ID)
+		if command {
+			h.noteUnsent(s, n) // the number stays taken (the message may be out there); the agent's report of the gap is not news
+		}
 		h.say(ctx, "⚠️ The message bus did not accept the message.")
-		return
+		return false
 	}
 	h.relayed.Add(1)
 	h.log.Debug("relayed", "agent", agent, "type", string(t), "id", p.ID)
-	if t == wire.TypeText || t == wire.TypeKey {
-		h.rememberCommand(agent, p.ID, msgID)
+	return true
+}
+
+// Attempts at publishing a command, and the pause between them. The pause stays well under the agent's reorder window,
+// so that a command that needed a second try still arrives before the one that follows it.
+const (
+	publishAttempts  = 3
+	publishRetryWait = 300 * time.Millisecond
+)
+
+// publish sends sealed bytes to an agent and tries again after a failure. The same bytes go out every time: if an
+// earlier attempt reached the bus after all, the agent drops the copy (same id; a ratchet key opens only once). The
+// command number is not given back after a publish, since the message may be out there.
+func (h *Hub) publish(ctx context.Context, agent string, data []byte) error {
+	var err error
+	for attempt := 1; attempt <= publishAttempts; attempt++ {
+		if err = h.cfg.Transport.Publish(ctx, h.cfg.Names.ToAgent(agent), data, wire.Attrs(wire.KindMsg, agent)); err == nil {
+			return nil
+		}
+		h.log.Warn("publish failed", "agent", agent, "attempt", attempt, "err", err)
+		if attempt == publishAttempts {
+			break
+		}
+		select {
+		case <-time.After(publishRetryWait):
+		case <-ctx.Done():
+			return err
+		}
 	}
+	return err
 }
 
 func (h *Hub) lockdown(ctx context.Context) {
@@ -843,18 +1027,42 @@ func (h *Hub) lockdown(ctx context.Context) {
 		}
 	}
 	h.mu.Unlock()
+	h.gateDropAll(ctx) // what waits behind a file must not be sent after the lockdown
+	sort.Slice(ts, func(i, j int) bool { return ts[i].name < ts[j].name })
 	now := h.cfg.Now()
+	told := 0
+	var failed []string
 	for _, t := range ts {
-		h.sendLockdown(ctx, t.name, t.s, now)
+		if h.sendLockdown(ctx, t.name, t.s, now) == nil {
+			told++
+		} else {
+			failed = append(failed, t.name)
+		}
 	}
-	h.say(ctx, fmt.Sprintf("Lockdown: the hub stopped relaying and told %d agent(s) to refuse text and keys until unlocked on their own machine.%s", len(ts), keptNote))
+	note := keptNote
+	if len(failed) > 0 {
+		note = " Could not reach " + strings.Join(failed, ", ") + ": the hub repeats the lockdown while that agent reports itself unlocked." + note
+	}
+	h.say(ctx, fmt.Sprintf("Lockdown: the hub stopped relaying and told %d agent(s) to refuse text and keys until unlocked on their own machine.%s", told, note))
 }
 
-func (h *Hub) sendLockdown(ctx context.Context, agent string, s *sess, now time.Time) {
-	p := &wire.Payload{ID: newID(), Type: wire.TypeLockdown, TS: now.Unix(), Exp: now.Add(time.Hour).Unix()}
-	if data, err := wire.Seal(s.r, h.cfg.Identity.Name, agent, s.sid, p); err == nil {
-		h.cfg.Transport.Publish(ctx, h.cfg.Names.ToAgent(agent), data, wire.Attrs(wire.KindMsg, agent))
+// sendLockdown tells one agent to lock. The error says the message was not sent; a lockdown that did not get through must
+// never be reported as sent, since /unlock on the hub does not unlock agents.
+func (h *Hub) sendLockdown(ctx context.Context, agent string, s *sess, now time.Time) error {
+	h.mu.Lock()
+	if st := h.agents[agent]; st != nil {
+		st.lockSent = now
 	}
+	h.mu.Unlock()
+	p := &wire.Payload{ID: newID(), Type: wire.TypeLockdown, TS: now.Unix(), Exp: now.Add(time.Hour).Unix()}
+	data, err := wire.Seal(s.r, h.cfg.Identity.Name, agent, s.sid, p)
+	if err == nil {
+		err = h.cfg.Transport.Publish(ctx, h.cfg.Names.ToAgent(agent), data, wire.Attrs(wire.KindMsg, agent))
+	}
+	if err != nil {
+		h.log.Warn("could not send the lockdown", "agent", agent, "err", err)
+	}
+	return err
 }
 
 // ---- bus side ----
@@ -917,20 +1125,33 @@ func (h *Hub) onHello(ctx context.Context, m *transport.Message) {
 		h.reject(m, "hello refused")
 		return
 	}
+	data, err := ack.Encode()
+	if err != nil {
+		h.guard.Forget(hello)
+		h.reject(m, "encode")
+		return
+	}
+	offered := &sess{sid: res.SessionID, r: ratchet.NewResponder(res.SessionKey, res.OwnRatchetKey)}
 	h.mu.Lock()
+	prevHello := st.lastHello
 	st.lastHello = now
-	st.pending = append(st.pending, &sess{sid: res.SessionID, r: ratchet.NewResponder(res.SessionKey, res.OwnRatchetKey)})
+	st.pending = append(st.pending, offered)
 	if len(st.pending) > maxPending {
 		st.pending = st.pending[len(st.pending)-maxPending:]
 	}
 	h.mu.Unlock()
-	data, err := ack.Encode()
-	if err != nil {
-		h.reject(m, "encode")
-		return
-	}
 	if err := h.cfg.Transport.Publish(ctx, h.cfg.Names.ToAgent(hello.From), data, wire.Attrs(wire.KindAck, hello.From)); err != nil {
 		h.log.Warn("could not publish ack", "err", err)
+		// Undo what the hello changed. The bus delivers it again after the Nack, and it must be answered then, not
+		// refused as a replay or as too soon; and a session nobody was told about would make the hub tell users the
+		// agent is "reconnecting" and send it nothing.
+		h.guard.Forget(hello)
+		h.mu.Lock()
+		st.pending = slices.DeleteFunc(st.pending, func(x *sess) bool { return x == offered })
+		if st.lastHello.Equal(now) {
+			st.lastHello = prevHello
+		}
+		h.mu.Unlock()
 		m.Nack() // the agent will also retry, but a transient bus failure deserves another attempt
 		return
 	}
@@ -968,6 +1189,9 @@ func (h *Hub) onMsg(ctx context.Context, m *transport.Message) {
 	}
 	p, err := wire.Open(s.r, name, h.cfg.Identity.Name, sid, m.Data, true)
 	if err != nil {
+		if errors.Is(err, ratchet.ErrRateLimited) {
+			h.noteRateLimited(name)
+		}
 		h.reject(m, "did not authenticate")
 		return
 	}
@@ -991,15 +1215,29 @@ func (h *Hub) onMsg(ctx context.Context, m *transport.Message) {
 	first := !st.everConnected
 	st.everConnected = true
 	_, dup := st.seenIDs[p.ID]
+	// A resend of a reply that is still being written to the chat is dropped, with no receipt: the agent resends after a
+	// while, and the chat must not show it twice. A reply that is not in flight yet is marked so that the next one is.
+	busy := false
+	if !dup && spooledType(p.Type) {
+		if _, busy = st.inflight[p.ID]; !busy {
+			st.inflight[p.ID] = struct{}{}
+		}
+	}
 	h.mu.Unlock()
 	if promoted && locked {
 		// A lockdown reaches only the sessions that existed when it was ordered. A machine that reconnects later,
 		// for example after the hub restarted, must hear it again.
 		h.sendLockdown(ctx, name, s, now)
 	}
+	if comeback && p.Type != wire.TypeReady { // "ready" says it with "connected"
+		h.sayAs(ctx, name, "✅ "+name+" is back.")
+	}
+	if busy {
+		return
+	}
 	if dup {
 		// Already shown. The agent is asking again because it never got the receipt: confirm, do not repeat.
-		if p.Type == wire.TypeReply || p.Type == wire.TypeNotice || p.Type == wire.TypeAlert {
+		if spooledType(p.Type) {
 			h.receipt(ctx, name, s, p.ID)
 		}
 		return
@@ -1013,9 +1251,12 @@ func (h *Hub) onMsg(ctx context.Context, m *transport.Message) {
 	case wire.TypeHeartbeat:
 		h.mu.Lock()
 		st.info = p.Meta
+		// The agent says it is not locked although the hub is: the lockdown did not reach it, or it was unlocked on its
+		// machine while the hub stayed locked. Say it again, spaced out so that the heartbeat in flight does not trigger it.
+		again := h.locked && p.Meta["locked"] == "false" && now.Sub(st.lockSent) >= h.cfg.LockdownResend
 		h.mu.Unlock()
-		if comeback {
-			h.sayAs(ctx, name, "✅ "+name+" is back.")
+		if again {
+			h.sendLockdown(ctx, name, s, now)
 		}
 		h.ackHeartbeat(ctx, name, s)
 	case wire.TypeReply, wire.TypeNotice, wire.TypeAlert:
@@ -1024,17 +1265,42 @@ func (h *Hub) onMsg(ctx context.Context, m *transport.Message) {
 		if p.Type == wire.TypeAlert {
 			text = "🚨 ALARM " + text
 		}
-		if err := h.sayAs(ctx, name, text); err == nil {
-			h.markSeen(st, p.ID)
+		err := h.sayMessage(ctx, name, h.messageFor(name, p, text))
+		if refused(err) {
+			// Telegram refuses this message and will refuse it again; resending it for ever would only repeat the parts
+			// that did go out. Drop it and let the agent forget it. Ids and sizes only, never the text.
+			h.log.Warn("the chat refuses a message, dropping it", "agent", name, "id", p.ID, "type", string(p.Type), "bytes", len(p.Body), "err", err)
+			err = nil
+		}
+		h.mu.Lock()
+		delete(st.inflight, p.ID)
+		if err == nil {
+			h.remember(st, p.ID)
+		}
+		h.mu.Unlock()
+		if err == nil {
 			h.receipt(ctx, name, s, p.ID)
 		}
 		return
+	case wire.TypePart, wire.TypeFile:
+		h.onFileItem(ctx, name, st, s, p)
+		return
 	case wire.TypeDone:
 		h.markDelivered(name, p.Body)
+		h.noteDone(name, p.Body)
 	case wire.TypeDropped:
-		h.sayAs(ctx, name, "⚠️ "+h.tag(name)+p.Body)
+		if !h.wasUnsent(s, p.Meta[wire.MetaSeq]) {
+			h.sayAs(ctx, name, "⚠️ "+h.tag(name)+p.Body)
+		}
 	}
 	h.markSeen(st, p.ID)
+}
+
+// refused says that Telegram answered 400 to a message: the same message would be refused again however often it is sent.
+// Other failures (429, 403, 5xx, no answer) may pass, so the agent keeps the message and sends it again.
+func refused(err error) bool {
+	var ae *telegram.APIError
+	return errors.As(err, &ae) && ae.Code == 400
 }
 
 func (h *Hub) markSeen(st *agentState, id string) {
@@ -1109,6 +1375,12 @@ func (h *Hub) checkOffline(ctx context.Context) {
 	h.mu.Unlock()
 	sort.Slice(notify, func(i, j int) bool { return notify[i].text < notify[j].text })
 	for _, n := range notify {
-		h.sayAs(ctx, n.agent, n.text)
+		if err := h.sayAs(ctx, n.agent, n.text); err != nil {
+			// The chat did not take it: forget that it was said, so that the next pass says it. If the agent spoke in the
+			// meantime the flag is already clear and it stays so.
+			h.mu.Lock()
+			h.agents[n.agent].offlineNotice = false
+			h.mu.Unlock()
+		}
 	}
 }

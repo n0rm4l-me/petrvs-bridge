@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -28,7 +30,9 @@ type Update struct {
 	// ReplyToID is the message this one answers (a swipe-reply in the chat), 0 when it answers none.
 	ReplyToID int64
 	Text      string
-	Date      time.Time // when Telegram received the message; zero when unknown
+	// Media is the photo or document that came with the message, nil for a plain message; Text then holds its caption.
+	Media *FileRef
+	Date  time.Time // when Telegram received the message; zero when unknown
 	// CallbackID and CallbackData are set instead of Text when the user tapped an inline button; MessageID is then the
 	// message that carries the button.
 	CallbackID, CallbackData string
@@ -74,11 +78,29 @@ type HTTP struct {
 	token string
 	base  string
 	hc    *http.Client
+	// sending holds one slot: a message goes out whole (all parts, 429 waits included) before the next one starts, so
+	// that messages written at the same moment do not interleave or swap places.
+	sending chan struct{}
+	// recycle is set when a call failed on the network. The HTTP/2 stream of a request that timed out is still being
+	// closed when Do returns, so its connection does not count as idle yet; the next call drops it once it does.
+	recycle atomic.Bool
 }
 
 // NewHTTP returns a client for the bot token.
 func NewHTTP(token string) *HTTP {
-	return &HTTP{token: token, base: "https://api.telegram.org", hc: &http.Client{}}
+	return &HTTP{token: token, base: "https://api.telegram.org", hc: &http.Client{Transport: newTransport()}, sending: make(chan struct{}, 1)}
+}
+
+// newTransport is the default transport with HTTP/2 health checks: a connection that goes silent (a NAT that dropped it)
+// is pinged and closed, instead of being reused by every later call until the kernel gives up on it.
+func newTransport() http.RoundTripper {
+	t, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return http.DefaultTransport
+	}
+	t = t.Clone()
+	t.HTTP2 = &http.HTTP2Config{SendPingTimeout: pingAfter, PingTimeout: pingWait}
+	return t
 }
 
 // WithBaseURL points the client at another server (tests, or a local Bot API server).
@@ -96,11 +118,37 @@ type apiResponse struct {
 	} `json:"parameters"`
 }
 
-// ErrRateLimited carries the wait Telegram asked for.
+// ErrRateLimited carries the wait Telegram asked for; After is zero when the answer did not say.
 type ErrRateLimited struct{ After time.Duration }
 
 func (e ErrRateLimited) Error() string {
 	return fmt.Sprintf("telegram: rate limited, retry after %s", e.After)
+}
+
+// APIError is an answer of the Bot API that says no. Code is the HTTP status: 400 means this request is wrong and will be
+// wrong again, 403 that the bot may not write there, 5xx that the server has a problem. The text holds no token.
+type APIError struct {
+	Method string
+	Code   int
+	Desc   string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("telegram %s: HTTP %d: %s", e.Method, e.Code, e.Desc)
+}
+
+// seconds turns a wait in seconds given by the server into a duration, bounded so that a silly value cannot overflow.
+func seconds(n int) time.Duration {
+	return time.Duration(min(max(n, 0), 24*3600)) * time.Second
+}
+
+// retryAfterHeader reads a Retry-After given in seconds, 0 when absent or in another form.
+func retryAfterHeader(h http.Header) time.Duration {
+	n, err := strconv.Atoi(strings.TrimSpace(h.Get("Retry-After")))
+	if err != nil {
+		return 0
+	}
+	return seconds(n)
 }
 
 // clean removes the URL (which contains the token) from transport errors.
@@ -115,8 +163,11 @@ func clean(method string, err error) error {
 // How long a call may run: a long poll gets slack beyond the wait it asked the server for, a send gets sendTimeout.
 // Variables so that tests can shorten them.
 var (
-	slack       = 15 * time.Second
-	sendTimeout = 30 * time.Second
+	slack        = 15 * time.Second
+	sendTimeout  = 30 * time.Second
+	maxRetryWait = 30 * time.Second // the longest rate limit SendMessage waits out itself
+	pingAfter    = 30 * time.Second // an HTTP/2 connection that has been silent this long is pinged ...
+	pingWait     = 15 * time.Second // ... and closed if the ping is not answered within this
 )
 
 func (c *HTTP) call(ctx context.Context, method string, body any, within time.Duration) (*apiResponse, error) {
@@ -132,27 +183,44 @@ func (c *HTTP) call(ctx context.Context, method string, body any, within time.Du
 		return nil, clean(method, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.recycle.CompareAndSwap(true, false) {
+		c.hc.CloseIdleConnections()
+	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
+		// A connection that timed out may be dead but still in the pool; without this every later call would pick it
+		// up again and time out again.
+		c.hc.CloseIdleConnections()
+		c.recycle.Store(true)
 		return nil, clean(method, err)
 	}
 	defer resp.Body.Close()
 	var out apiResponse
-	if err := json.NewDecoder(http.MaxBytesReader(nil, resp.Body, 4<<20)).Decode(&out); err != nil {
+	decodeErr := json.NewDecoder(http.MaxBytesReader(nil, resp.Body, 4<<20)).Decode(&out)
+	if resp.StatusCode == http.StatusTooManyRequests {
+		// A proxy in front of Telegram may answer 429 with a page instead of JSON; the header still says how long to wait.
+		after := retryAfterHeader(resp.Header)
+		if decodeErr == nil && out.Parameters.RetryAfter > 0 {
+			after = seconds(out.Parameters.RetryAfter)
+		}
+		return nil, ErrRateLimited{After: after}
+	}
+	if decodeErr != nil {
 		return nil, fmt.Errorf("telegram %s: HTTP %d, unreadable answer", method, resp.StatusCode)
 	}
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, ErrRateLimited{After: time.Duration(out.Parameters.RetryAfter) * time.Second}
-	}
 	if !out.OK {
-		return nil, fmt.Errorf("telegram %s: HTTP %d: %s", method, resp.StatusCode, out.Description)
+		return nil, &APIError{Method: method, Code: resp.StatusCode, Desc: out.Description}
 	}
 	return &out, nil
 }
 
 // GetUpdates long-polls for new messages and button taps. Updates without text are skipped but still advance the offset.
 func (c *HTTP) GetUpdates(ctx context.Context, offset int64, timeout time.Duration) ([]Update, error) {
-	out, err := c.call(ctx, "getUpdates", map[string]any{"offset": offset, "timeout": int(timeout.Seconds()), "allowed_updates": []string{"message", "callback_query"}}, timeout+slack)
+	wait := int(timeout.Seconds())
+	if timeout > 0 && wait < 1 {
+		wait = 1 // under a second would round down to 0, a short poll that a loop repeats at full speed
+	}
+	out, err := c.call(ctx, "getUpdates", map[string]any{"offset": offset, "timeout": wait, "allowed_updates": []string{"message", "callback_query"}}, timeout+slack)
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +228,11 @@ func (c *HTTP) GetUpdates(ctx context.Context, offset int64, timeout time.Durati
 		MessageID int64  `json:"message_id"`
 		Date      int64  `json:"date"`
 		Text      string `json:"text"`
-		From      *struct {
+		// A photo or document comes with a caption instead of text; other kinds (stickers, voice, video) are left alone.
+		Caption  string         `json:"caption"`
+		Photo    []rawPhotoSize `json:"photo"`
+		Document *rawDocument   `json:"document"`
+		From     *struct {
 			ID int64 `json:"id"`
 		} `json:"from"`
 		Chat struct {
@@ -191,6 +263,9 @@ func (c *HTTP) GetUpdates(ctx context.Context, offset int64, timeout time.Durati
 		switch {
 		case r.Message != nil:
 			u.ChatID, u.MessageID, u.Text = r.Message.Chat.ID, r.Message.MessageID, r.Message.Text
+			if m := mediaOf(r.Message.Photo, r.Message.Document); m != nil {
+				u.Media, u.Text = m, r.Message.Caption
+			}
 			if r.Message.Date > 0 {
 				u.Date = time.Unix(r.Message.Date, 0)
 			}
@@ -212,9 +287,15 @@ func (c *HTTP) GetUpdates(ctx context.Context, offset int64, timeout time.Durati
 	return ups, nil
 }
 
-// Chunks splits text into pieces of at most max bytes, preferring line breaks, never inside a rune.
+// Chunks splits text into pieces of at most max bytes, preferring line breaks, never inside a rune. A piece that holds
+// only white space is left out: Telegram refuses an empty message.
 func Chunks(text string, max int) []string {
 	var out []string
+	add := func(part string) {
+		if strings.TrimSpace(part) != "" {
+			out = append(out, part)
+		}
+	}
 	for len(text) > max {
 		cut := strings.LastIndexByte(text[:max], '\n')
 		if cut < max/2 {
@@ -223,12 +304,10 @@ func Chunks(text string, max int) []string {
 				cut--
 			}
 		}
-		out = append(out, text[:cut])
+		add(text[:cut])
 		text = strings.TrimLeft(text[cut:], "\n")
 	}
-	if text != "" {
-		out = append(out, text)
-	}
+	add(text)
 	return out
 }
 
@@ -241,6 +320,12 @@ func (c *HTTP) Send(ctx context.Context, chatID int64, text string) error {
 // SendMessage is Send with inline buttons under the last part. It returns the ids of the parts that were sent, also on
 // error (the parts before the failing one did arrive).
 func (c *HTTP) SendMessage(ctx context.Context, chatID int64, m Message) ([]int64, error) {
+	select {
+	case c.sending <- struct{}{}:
+		defer func() { <-c.sending }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	var ids []int64
 	parts := Chunks(m.Text, MaxMessage)
 	for i, part := range parts {
@@ -253,14 +338,17 @@ func (c *HTTP) SendMessage(ctx context.Context, chatID int64, m Message) ([]int6
 			var rl ErrRateLimited
 			if errors.As(err, &rl) && attempt < 2 {
 				wait := rl.After
-				if wait <= 0 || wait > 30*time.Second {
-					wait = 5 * time.Second
+				if wait <= 0 {
+					wait = 5 * time.Second // the answer did not say
 				}
-				select {
-				case <-time.After(wait):
-					continue
-				case <-ctx.Done():
-					return ids, ctx.Err()
+				// A wait longer than the cap goes to the caller at once: trying earlier would only be refused again.
+				if wait <= maxRetryWait {
+					select {
+					case <-time.After(wait):
+						continue
+					case <-ctx.Done():
+						return ids, ctx.Err()
+					}
 				}
 			}
 			if err != nil {
@@ -350,6 +438,7 @@ type Fake struct {
 	nextMsg   int64
 	answered  []string
 	refused   map[string]bool
+	files     fakeMedia // uploads, downloads and cleared buttons; see fake_media.go
 }
 
 // NewFake returns an empty fake.

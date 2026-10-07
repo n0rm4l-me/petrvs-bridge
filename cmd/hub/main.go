@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -36,11 +38,14 @@ func level(s string) slog.Level {
 
 func run(args []string, getenv func(string) string) int {
 	cfg, err := config.ParseHub(args, getenv)
+	if errors.Is(err, flag.ErrHelp) {
+		return 0 // the usage has been printed on standard output
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level(cfg.LogLevel)}))
+	log := newLogger(os.Stdout, cfg.LogLevel)
 	id, err := identity.LoadOpts(cfg.Identity, cfg.AllowGroupRead)
 	if err != nil {
 		log.Error("cannot load the hub identity", "err", err)
@@ -90,6 +95,7 @@ func run(args []string, getenv func(string) string) int {
 		Telegram: telegram.NewHTTP(cfg.Token).WithBaseURL(cfg.TelegramBase), ChatID: cfg.ChatID, UserID: cfg.UserID, Log: log,
 		OfflineAfter: cfg.OfflineAfter, TextTTL: cfg.TextTTL, KeyTTL: cfg.KeyTTL, PollTimeout: cfg.PollTimeout, MaxReplyBytes: cfg.MaxReplyBytes,
 		LockFile: cfg.LockFile, ReceivedReaction: cfg.ReceivedReaction, DeliveredReaction: cfg.DeliveredReaction, DefaultAgent: cfg.DefaultAgent,
+		MaxFileBytes: cfg.MaxFileBytes,
 	})
 	if err != nil {
 		log.Error("invalid hub configuration", "err", err)

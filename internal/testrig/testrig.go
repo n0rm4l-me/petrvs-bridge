@@ -4,6 +4,7 @@ package testrig
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/n0rm4l-me/petrvs-bridge/internal/approval"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/hubsvc"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/screen"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/spool"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/telegram"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/transport"
@@ -113,6 +115,186 @@ type Options struct {
 	HubLockFile bool
 	// ReceivedReaction and DeliveredReaction are the hub's marks on the user's messages; empty means none.
 	ReceivedReaction, DeliveredReaction string
+	// FaultyBus puts a FaultyBus between the hub, the agents and the bus (Rig.Faulty), to fail publishes, delay them, or
+	// deliver each message in a goroutine of its own.
+	FaultyBus bool
+	// WrapTelegram gives the hub a client built around the rig's fake (to gate or fail calls); Rig.TG stays the fake.
+	WrapTelegram func(*telegram.Fake) telegram.Client
+	// Hub changes the hub's configuration before it is built.
+	Hub func(*hubsvc.Config)
+	// Screen gives every agent a FakeScreen (AgentRig.Screen) showing an idle Claude Code.
+	Screen bool
+	// Agent changes an agent's configuration before it is built; it runs after the rig's own settings.
+	Agent func(name string, c *agentsvc.Config)
+	// MinTurn is the least time between two batches of a file's parts, for the hub and every agent (zero: the default of
+	// the components, 250ms, which keeps a transfer within the budget of the real ratchet). A test that moves few parts
+	// and does not care about the ratchet's budget may use a few milliseconds to go faster.
+	MinTurn time.Duration
+}
+
+// FaultyBus wraps a bus to inject what a real one does. The in-memory bus calls its handlers one at a time, which hides
+// every race between two messages; Concurrent gives each delivery its own goroutine, as Pub/Sub does.
+type FaultyBus struct {
+	transport.Transport
+	// Concurrent gives each delivery its own goroutine. Receive reads it for every message, so it may be set before or
+	// after the rig starts; a test that sets it while the rig runs must use SetConcurrent, which takes the lock.
+	Concurrent bool
+
+	mu         sync.Mutex
+	fail       func(topic string) error
+	after      func(topic string)
+	latency    time.Duration
+	lanes      map[string]chan delayed
+	closed     chan struct{}
+	closedOnce sync.Once
+	active     int // handlers running now, and the most there were at the same time
+	overlap    int
+}
+
+// delayed is a message on its way through a lane of the bus with a latency.
+type delayed struct {
+	due   time.Time
+	data  []byte
+	attrs map[string]string
+}
+
+// SetConcurrent is the setting of Concurrent for a rig that is already running.
+func (b *FaultyBus) SetConcurrent(on bool) {
+	b.mu.Lock()
+	b.Concurrent = on
+	b.mu.Unlock()
+}
+
+func (b *FaultyBus) concurrent() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Concurrent
+}
+
+// Overlap is the most handlers that ran at the same time so far: a test that says it runs on a concurrent bus can check
+// that it really did.
+func (b *FaultyBus) Overlap() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.overlap
+}
+
+// run calls the handler and counts it among those running.
+func (b *FaultyBus) run(handler func(context.Context, *transport.Message), c context.Context, m *transport.Message) {
+	b.mu.Lock()
+	b.active++
+	b.overlap = max(b.overlap, b.active)
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		b.active--
+		b.mu.Unlock()
+	}()
+	handler(c, m)
+}
+
+// SetLatency makes every message published from now on reach the bus d later, in the order it was published (a long,
+// steady network: the sender does not wait, the receiver hears of it after d). Zero turns it off.
+func (b *FaultyBus) SetLatency(d time.Duration) {
+	b.mu.Lock()
+	b.latency = d
+	b.mu.Unlock()
+}
+
+// Stop ends what the latency lanes still hold; the rig does it when the test ends.
+func (b *FaultyBus) Stop() { b.closedOnce.Do(func() { close(b.closed) }) }
+
+// lane returns the queue of one topic, with the goroutine that passes its messages on when they are due.
+func (b *FaultyBus) lane(topic string) chan delayed {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if l := b.lanes[topic]; l != nil {
+		return l
+	}
+	if b.lanes == nil {
+		b.lanes = map[string]chan delayed{}
+	}
+	l := make(chan delayed, 8192)
+	b.lanes[topic] = l
+	go func() {
+		for {
+			select {
+			case <-b.closed:
+				return
+			case m := <-l:
+				if wait := time.Until(m.due); wait > 0 {
+					select {
+					case <-time.After(wait):
+					case <-b.closed:
+						return
+					}
+				}
+				b.Transport.Publish(context.Background(), topic, m.data, m.attrs)
+			}
+		}
+	}()
+	return l
+}
+
+// FailPublish makes Publish return the error f gives for a topic, without sending anything; nil from f lets it through.
+// A nil f clears it.
+func (b *FaultyBus) FailPublish(f func(topic string) error) {
+	b.mu.Lock()
+	b.fail = f
+	b.mu.Unlock()
+}
+
+// AfterPublish calls f once the bus has taken a message and before Publish returns (a slow acknowledgement). A nil f clears it.
+func (b *FaultyBus) AfterPublish(f func(topic string)) {
+	b.mu.Lock()
+	b.after = f
+	b.mu.Unlock()
+}
+
+func (b *FaultyBus) Publish(ctx context.Context, topic string, data []byte, attrs map[string]string) error {
+	b.mu.Lock()
+	fail, after := b.fail, b.after
+	b.mu.Unlock()
+	if fail != nil {
+		if err := fail(topic); err != nil {
+			return err
+		}
+	}
+	b.mu.Lock()
+	latency := b.latency
+	b.mu.Unlock()
+	if latency > 0 {
+		select {
+		case b.lane(topic) <- delayed{due: time.Now().Add(latency), data: append([]byte(nil), data...), attrs: attrs}:
+		default:
+			return errors.New("testrig: the latency lane is full")
+		}
+		if after != nil {
+			after(topic)
+		}
+		return nil
+	}
+	err := b.Transport.Publish(ctx, topic, data, attrs)
+	if err == nil && after != nil {
+		after(topic)
+	}
+	return err
+}
+
+func (b *FaultyBus) Receive(ctx context.Context, sub string, handler func(context.Context, *transport.Message)) error {
+	// Decided for each message, so that the setting works whenever it is made (the rig's Start... calls begin Receive
+	// before a test can touch the bus).
+	var wg sync.WaitGroup
+	err := b.Transport.Receive(ctx, sub, func(c context.Context, m *transport.Message) {
+		if !b.concurrent() {
+			b.run(handler, c, m)
+			return
+		}
+		wg.Add(1)
+		go func() { defer wg.Done(); b.run(handler, c, m) }()
+	})
+	wg.Wait()
+	return err
 }
 
 // Sensor is an alarm sensor the test triggers by hand.
@@ -143,6 +325,8 @@ type AgentRig struct {
 	Exec     *Exec
 	Spool    *spool.Spool
 	LockFile string
+	// Screen is the fake screen of the agent's session (nil unless Options.Screen is set).
+	Screen *FakeScreen
 	// Sensor is the alarm's test sensor (nil when the rig has no alarm).
 	Sensor     *Sensor
 	AlarmState string
@@ -164,6 +348,8 @@ type Rig struct {
 	Hub    *hubsvc.Hub
 	Agents map[string]*AgentRig
 	Clock  *Clock
+	// Faulty is the bus the hub and the agents use when Options.FaultyBus is set, nil otherwise.
+	Faulty *FaultyBus
 
 	hubCfg hubsvc.Config
 	cancel context.CancelFunc
@@ -207,6 +393,11 @@ func New(t *testing.T, o Options) *Rig {
 		r.Bus = r.Mem
 		r.Mem.Bind(r.Names.ToHub(), r.Names.HubSub())
 	}
+	if o.FaultyBus {
+		r.Faulty = &FaultyBus{Transport: r.Bus, closed: make(chan struct{})}
+		t.Cleanup(r.Faulty.Stop)
+		r.Bus = r.Faulty
+	}
 	var pubs []identity.Public
 	for _, name := range o.Agents {
 		id, err := identity.Generate(name)
@@ -245,24 +436,40 @@ func New(t *testing.T, o Options) *Rig {
 		if o.ReorderWindow > 0 {
 			ar.cfg.ReorderWindow = o.ReorderWindow
 		}
+		ar.cfg.MinTurn = o.MinTurn
 		if r.Clock != nil {
 			ar.cfg.Now = r.Clock.Now
 		}
+		if o.Screen {
+			ar.Screen = NewFakeScreen()
+			ar.cfg.Screen = ar.Screen
+		}
+		if o.Agent != nil {
+			o.Agent(name, &ar.cfg)
+		}
 		r.Agents[name] = ar
 	}
+	var chat telegram.Client = r.TG
+	if o.WrapTelegram != nil {
+		chat = o.WrapTelegram(r.TG)
+	}
 	r.hubCfg = hubsvc.Config{
-		Identity: r.HubID, Agents: pubs, Transport: r.Bus, Names: r.Names, Telegram: r.TG, ChatID: ChatID, UserID: UserID, Log: quietLog(),
+		Identity: r.HubID, Agents: pubs, Transport: r.Bus, Names: r.Names, Telegram: chat, ChatID: ChatID, UserID: UserID, Log: quietLog(),
 		OfflineAfter: 500 * time.Millisecond * r.mult, WatchEvery: 40 * time.Millisecond * r.mult, HelloMinInterval: 20 * time.Millisecond,
 		PollTimeout: 150 * time.Millisecond, ReceivedReaction: o.ReceivedReaction, DeliveredReaction: o.DeliveredReaction,
 	}
 	if o.OfflineAfter > 0 {
 		r.hubCfg.OfflineAfter = o.OfflineAfter
 	}
+	r.hubCfg.MinTurn = o.MinTurn
 	if o.HubLockFile {
 		r.hubCfg.LockFile = filepath.Join(t.TempDir(), "hub-lock")
 	}
 	if r.Clock != nil {
 		r.hubCfg.Now = r.Clock.Now
+	}
+	if o.Hub != nil {
+		o.Hub(&r.hubCfg)
 	}
 	t.Cleanup(r.StopAll)
 	return r
@@ -522,3 +729,80 @@ func (tp *Tap) Messages() []*transport.Message {
 	defer tp.mu.Unlock()
 	return append([]*transport.Message(nil), tp.msgs...)
 }
+
+// FakeScreen stands in for the tmux session an agent types into: a screen that the test sets, the program in the
+// foreground, and a record of the sessions the agent started.
+type FakeScreen struct {
+	mu       sync.Mutex
+	screen   string
+	command  string
+	missing  bool
+	started  []string
+	startErr error
+	captures int
+}
+
+// IdleScreen is what Claude Code shows when it waits for the next request.
+const IdleScreen = "⏺ Done.\n\n────────────────────────────────────────────────────────────────────────────────\n ❯ \n────────────────────────────────────────────────────────────────────────────────\n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+
+// NewFakeScreen shows an idle Claude Code in auto mode.
+func NewFakeScreen() *FakeScreen { return &FakeScreen{screen: IdleScreen, command: "claude"} }
+
+// Set changes what the screen shows.
+func (f *FakeScreen) Set(screen string) { f.mu.Lock(); f.screen = screen; f.mu.Unlock() }
+
+// SetCommand changes the program in the foreground ("claude", "zsh", ...).
+func (f *FakeScreen) SetCommand(c string) { f.mu.Lock(); f.command = c; f.mu.Unlock() }
+
+// SetMissing makes the session disappear (true) or come back (false).
+func (f *FakeScreen) SetMissing(m bool) { f.mu.Lock(); f.missing = m; f.mu.Unlock() }
+
+// SetStartErr makes Start fail with err until it is called again with nil.
+func (f *FakeScreen) SetStartErr(err error) { f.mu.Lock(); f.startErr = err; f.mu.Unlock() }
+
+// Started lists the sessions that were started, as "workdir|command".
+func (f *FakeScreen) Started() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.started...)
+}
+
+// Captures counts how often the screen was read.
+func (f *FakeScreen) Captures() int { f.mu.Lock(); defer f.mu.Unlock(); return f.captures }
+
+// Capture returns the screen, or screen.ErrNoSession when the session is missing.
+func (f *FakeScreen) Capture(context.Context) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.captures++
+	if f.missing {
+		return "", screen.ErrNoSession
+	}
+	return f.screen, nil
+}
+
+// PaneCommand returns the program in the foreground, or screen.ErrNoSession when the session is missing.
+func (f *FakeScreen) PaneCommand(context.Context) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.missing {
+		return "", screen.ErrNoSession
+	}
+	return f.command, nil
+}
+
+// Start records the start and brings the session back, running the first word of the command.
+func (f *FakeScreen) Start(_ context.Context, workdir, command string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.startErr != nil {
+		return f.startErr
+	}
+	f.started = append(f.started, workdir+"|"+command)
+	f.missing = false
+	f.command, _, _ = strings.Cut(command, " ")
+	f.screen = IdleScreen
+	return nil
+}
+
+var _ agentsvc.Screen = (*FakeScreen)(nil)
