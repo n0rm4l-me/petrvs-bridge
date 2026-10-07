@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"claudebridge/internal/approval"
-	"claudebridge/internal/testrig"
-	"claudebridge/internal/wire"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/approval"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/testrig"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
 )
 
 func alarmRig(t *testing.T, o testrig.Options) (*testrig.Rig, *testrig.AgentRig) {

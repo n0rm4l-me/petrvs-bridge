@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"claudebridge/internal/handshake"
-	"claudebridge/internal/testrig"
-	"claudebridge/internal/transport"
-	"claudebridge/internal/wire"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/handshake"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/testrig"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/transport"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
 )
 
 func emuRig(t *testing.T, agents ...string) (*testrig.Rig, *transport.PubSub) {

@@ -1,12 +1,12 @@
 # Linux: a user service for the agent. NOT YET RUN. Copy to ~/.config/systemd/user/, edit, then:
-#   systemctl --user daemon-reload && systemctl --user enable --now claude-bridge-agent
+#   systemctl --user daemon-reload && systemctl --user enable --now petrvs-bridge-agent
 [Unit]
-Description=claude-bridge agent
+Description=petrvs-bridge agent
 After=network-online.target
 
 [Service]
 ExecStart=%h/.local/bin/agent run
-EnvironmentFile=%h/.config/claude-bridge/agent.env
+EnvironmentFile=%h/.config/petrvs-bridge/agent.env
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

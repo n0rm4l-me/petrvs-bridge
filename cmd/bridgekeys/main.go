@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"claudebridge/internal/approval"
-	"claudebridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/approval"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
 )
 
 const usage = `usage:
@@ -108,7 +108,7 @@ func totpSecret(args []string) int {
 	if _, err := fmt.Fprintln(f, b32); err != nil {
 		return fail(err)
 	}
-	fmt.Printf("secret written to %s (0600).\nAdd it to an authenticator app, preferably on a different device from your chat app:\n  otpauth://totp/claude-bridge:alarm?secret=%s&issuer=claude-bridge\nThen set CB_ALARM_SECRET_FILE=%s on the agent.\n", *out, b32, *out)
+	fmt.Printf("secret written to %s (0600).\nAdd it to an authenticator app, preferably on a different device from your chat app:\n  otpauth://totp/petrvs-bridge:alarm?secret=%s&issuer=petrvs-bridge\nThen set PB_ALARM_SECRET_FILE=%s on the agent.\n", *out, b32, *out)
 	return 0
 }
 

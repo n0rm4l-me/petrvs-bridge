@@ -134,7 +134,7 @@ func TestRealBinariesEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "bin")
 	for _, c := range []string{"hub", "agent", "bridgekeys"} {
-		must(t, exec.Command("go", "build", "-o", filepath.Join(bin, c), "claudebridge/cmd/"+c))
+		must(t, exec.Command("go", "build", "-o", filepath.Join(bin, c), "github.com/n0rm4l-me/petrvs-bridge/cmd/"+c))
 	}
 	keys := filepath.Join(dir, "keys")
 	agents := filepath.Join(dir, "agents")
@@ -162,13 +162,13 @@ func TestRealBinariesEndToEnd(t *testing.T) {
 
 	prefix := fmt.Sprintf("smoke%d", time.Now().UnixNano()%1_000_000)
 	state := filepath.Join(dir, "state")
-	common := []string{"CB_PROJECT=cb-smoke", "CB_PREFIX=" + prefix, "CB_CREATE_RESOURCES=true", "CB_LOG_LEVEL=debug"}
+	common := []string{"PB_PROJECT=pb-smoke", "PB_PREFIX=" + prefix, "PB_CREATE_RESOURCES=true", "PB_LOG_LEVEL=debug"}
 	hub := start(t, filepath.Join(bin, "hub"), append(common,
-		"CB_IDENTITY="+filepath.Join(keys, "hub.identity.json"), "CB_AGENTS_DIR="+agents, "CB_CHAT_ID=1001",
-		"TELEGRAM_BOT_TOKEN="+token, "CB_TELEGRAM_API_BASE="+srv.URL, "CB_POLL_TIMEOUT=1s", "CB_OFFLINE_AFTER=1m"))
-	agentEnv := append(common, "CB_NAME=laptop", "CB_IDENTITY="+filepath.Join(keys, "laptop.identity.json"), "CB_HUB_PUB="+filepath.Join(keys, "hub.pub.json"),
-		"CB_TMUX_SESSION="+session, "CB_STATE_DIR="+state, "CB_ALARM=false", "CB_HEARTBEAT=300ms", "CB_HANDSHAKE_RETRY=500ms",
-		"CB_SILENCE_LIMIT=5s", "CB_RECEIPT_TIMEOUT=1s")
+		"PB_IDENTITY="+filepath.Join(keys, "hub.identity.json"), "PB_AGENTS_DIR="+agents, "PB_CHAT_ID=1001",
+		"TELEGRAM_BOT_TOKEN="+token, "PB_TELEGRAM_API_BASE="+srv.URL, "PB_POLL_TIMEOUT=1s", "PB_OFFLINE_AFTER=1m"))
+	agentEnv := append(common, "PB_NAME=laptop", "PB_IDENTITY="+filepath.Join(keys, "laptop.identity.json"), "PB_HUB_PUB="+filepath.Join(keys, "hub.pub.json"),
+		"PB_TMUX_SESSION="+session, "PB_STATE_DIR="+state, "PB_ALARM=false", "PB_HEARTBEAT=300ms", "PB_HANDSHAKE_RETRY=500ms",
+		"PB_SILENCE_LIMIT=5s", "PB_RECEIPT_TIMEOUT=1s")
 	agent := start(t, filepath.Join(bin, "agent"), agentEnv)
 
 	eventually(t, "the hub to report the agent connected\nhub:\n"+hub.output()+"\nagent:\n"+agent.output(), 30*time.Second, func() bool { return strings.Contains(tg.sentText(), "laptop is connected") })
@@ -186,11 +186,11 @@ func TestRealBinariesEndToEnd(t *testing.T) {
 	}
 
 	// a hook on the laptop queues a reply, the hub shows it
-	must(t, withEnv(exec.Command(filepath.Join(bin, "agent"), "send", "the answer from claude"), "CB_STATE_DIR="+state))
+	must(t, withEnv(exec.Command(filepath.Join(bin, "agent"), "send", "the answer from claude"), "PB_STATE_DIR="+state))
 	eventually(t, "the reply in the chat", 15*time.Second, func() bool { return strings.Contains(tg.sentText(), "the answer from claude") })
 
 	// a reply fed on standard input
-	c := withEnv(exec.Command(filepath.Join(bin, "agent"), "send", "-type", "notice", "-"), "CB_STATE_DIR="+state)
+	c := withEnv(exec.Command(filepath.Join(bin, "agent"), "send", "-type", "notice", "-"), "PB_STATE_DIR="+state)
 	c.Stdin = strings.NewReader("multi\nline\nnotice\n")
 	must(t, c)
 	eventually(t, "the notice in the chat", 15*time.Second, func() bool { return strings.Contains(tg.sentText(), "multi\nline\nnotice") })
@@ -204,7 +204,7 @@ func TestRealBinariesEndToEnd(t *testing.T) {
 	if strings.Contains(pane(), "blocked while locked") {
 		t.Fatal("a locked agent typed text")
 	}
-	out := must(t, withEnv(exec.Command(filepath.Join(bin, "agent"), "unlock"), "CB_STATE_DIR="+state))
+	out := must(t, withEnv(exec.Command(filepath.Join(bin, "agent"), "unlock"), "PB_STATE_DIR="+state))
 	if !strings.Contains(out, "unlocked") {
 		t.Fatal(out)
 	}

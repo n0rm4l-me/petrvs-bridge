@@ -80,7 +80,7 @@ func (p Public) Validate() error {
 // Fingerprint is a short string two people can compare over two channels.
 func (p Public) Fingerprint() string {
 	h := sha256.New()
-	h.Write([]byte("claudebridge identity v1"))
+	h.Write([]byte("petrvs-bridge identity v1"))
 	var l [2]byte
 	binary.BigEndian.PutUint16(l[:], uint16(len(p.Name)))
 	h.Write(l[:])

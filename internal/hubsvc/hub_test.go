@@ -3,9 +3,9 @@ package hubsvc
 import (
 	"testing"
 
-	"claudebridge/internal/identity"
-	"claudebridge/internal/telegram"
-	"claudebridge/internal/transport"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/telegram"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/transport"
 )
 
 func base(t *testing.T) Config {
@@ -37,7 +37,7 @@ func TestNewValidates(t *testing.T) {
 	}
 }
 
-func TestFirstAgentIsActiveAndNothingIsOnlineAtStart(t *testing.T) {
+func TestNoAgentIsActiveOrOnlineAtStartWhenThereAreSeveral(t *testing.T) {
 	c := base(t)
 	b, _ := identity.Generate("desk")
 	c.Agents = append(c.Agents, b.Public())
@@ -45,7 +45,7 @@ func TestFirstAgentIsActiveAndNothingIsOnlineAtStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.activeName() != "desk" { // sorted by name
+	if h.activeName() != "" { // the hub asks instead of guessing
 		t.Fatalf("active = %q", h.activeName())
 	}
 	if h.Online("laptop") || h.Online("desk") || h.Online("ghost") {

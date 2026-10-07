@@ -20,7 +20,7 @@ func emu(t *testing.T) *PubSub {
 		t.Skip("PUBSUB_EMULATOR_HOST not set; run scripts/with-emulator.sh go test ./...")
 	}
 	ctx := context.Background()
-	p, err := NewPubSub(ctx, "cb-test")
+	p, err := NewPubSub(ctx, "pb-test")
 	if err != nil {
 		t.Fatal(err)
 	}

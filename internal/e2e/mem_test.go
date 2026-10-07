@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"claudebridge/internal/handshake"
-	"claudebridge/internal/identity"
-	"claudebridge/internal/ratchet"
-	"claudebridge/internal/testrig"
-	"claudebridge/internal/wire"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/handshake"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/ratchet"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/testrig"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
 )
 
 func one(t *testing.T, opts testrig.Options) (*testrig.Rig, *testrig.AgentRig) {
@@ -181,6 +181,10 @@ func TestForgedFloodNeverBreaksTheSession(t *testing.T) {
 		r.Mem.Inject(r.Names.AgentSub("laptop"), junk(50+i), map[string]string{"kind": "weird"})
 	}
 	r.Eventually("junk rejected", func() bool { return a.Agent.Stats().Rejected >= 600 })
+	// The agent reported "before" as done, so the hub's next message carries a new key, and the flood has used up the
+	// agent's budget of new-key agreements (20 at once, then 5 a second). A real message that needs a new key is refused
+	// until the budget has refilled (see the limitations); the session itself is not harmed, which is what this checks.
+	time.Sleep(time.Second)
 	r.Say("after the flood")
 	r.Eventually("the real session survived", func() bool { return len(a.Exec.Texts()) == 2 })
 	if a.Exec.Texts()[1] != "after the flood" || a.Agent.Stats().Executed != 2 {

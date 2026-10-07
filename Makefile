@@ -1,7 +1,13 @@
-.PHONY: build vet test test-emulator fuzz cover vuln clean
+.PHONY: build dist vet test test-emulator fuzz cover vuln clean
 
 build:
 	go build -o bin/ ./cmd/...
+
+# Static binaries of all three programs for the machines that run the agent (no Docker needed).
+dist:
+	for t in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do \
+		GOOS=$${t%/*} GOARCH=$${t#*/} CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/dist/$${t%/*}-$${t#*/}/ ./cmd/... || exit 1; \
+	done
 
 vet:
 	go vet ./...

@@ -7,9 +7,9 @@ set -eu
 if [ -n "${PUBSUB_EMULATOR_HOST:-}" ]; then
   exec "$@"
 fi
-PORT="${CB_EMULATOR_PORT:-18085}"
-LOG="$(mktemp -t cb-emulator.XXXXXX)"
-gcloud beta emulators pubsub start --host-port="127.0.0.1:$PORT" --project=cb-test >"$LOG" 2>&1 &
+PORT="${PB_EMULATOR_PORT:-18085}"
+LOG="$(mktemp -t pb-emulator.XXXXXX)"
+gcloud beta emulators pubsub start --host-port="127.0.0.1:$PORT" --project=pb-test >"$LOG" 2>&1 &
 PID=$!
 cleanup() {
   kill "$PID" 2>/dev/null || true

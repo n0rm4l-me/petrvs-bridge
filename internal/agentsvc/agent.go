@@ -22,14 +22,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"claudebridge/internal/alarm"
-	"claudebridge/internal/approval"
-	"claudebridge/internal/handshake"
-	"claudebridge/internal/identity"
-	"claudebridge/internal/ratchet"
-	"claudebridge/internal/spool"
-	"claudebridge/internal/transport"
-	"claudebridge/internal/wire"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/alarm"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/approval"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/handshake"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/ratchet"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/spool"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/transport"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
 )
 
 // Executor types into the session.
@@ -655,6 +655,10 @@ func (a *Agent) execute(ctx context.Context, p *wire.Payload) {
 	}
 	a.executed.Add(1)
 	a.log.Info("executed", "type", p.Type, "id", p.ID, "bytes", len(p.Body))
+	// Tells the hub, which can then mark the user's message as delivered. Not spooled: if it is lost, only the mark is.
+	if err := a.send(ctx, &wire.Payload{Type: wire.TypeDone, Body: p.ID}); err != nil {
+		a.log.Debug("could not report a finished command", "id", p.ID, "err", err)
+	}
 }
 
 // alert reports a touch of the machine. It goes through the spool when there is one, so it is confirmed by the hub and

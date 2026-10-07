@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"claudebridge/internal/identity"
-	"claudebridge/internal/ratchet"
-	"claudebridge/internal/transport"
-	"claudebridge/internal/wire"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/ratchet"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/transport"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
 )
 
 type recExec struct {

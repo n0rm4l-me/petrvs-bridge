@@ -19,15 +19,15 @@ import (
 	"syscall"
 	"time"
 
-	"claudebridge/internal/agentsvc"
-	"claudebridge/internal/alarm"
-	"claudebridge/internal/approval"
-	"claudebridge/internal/config"
-	"claudebridge/internal/identity"
-	"claudebridge/internal/spool"
-	"claudebridge/internal/tmuxctl"
-	"claudebridge/internal/transport"
-	"claudebridge/internal/wire"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/agentsvc"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/alarm"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/approval"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/config"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/spool"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/tmuxctl"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/transport"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Getenv, os.Stdin)) }
@@ -77,13 +77,13 @@ func send(args []string, getenv func(string) string, stdin io.Reader) int {
 		return 2
 	}
 	// Only the state directory is needed to queue a message, so this works without the full configuration.
-	dir := getenv("CB_STATE_DIR")
+	dir := getenv("PB_STATE_DIR")
 	if dir == "" {
 		cfg, code := parse(nil, func(k string) string {
-			if k == "CB_NAME" {
+			if k == "PB_NAME" {
 				return "x"
 			}
-			if k == "CB_IDENTITY" || k == "CB_HUB_PUB" {
+			if k == "PB_IDENTITY" || k == "PB_HUB_PUB" {
 				return "unused"
 			}
 			return getenv(k)
@@ -122,9 +122,9 @@ func send(args []string, getenv func(string) string, stdin io.Reader) int {
 func unlock(args []string, getenv func(string) string) int {
 	cfg, code := parse(args, func(k string) string {
 		switch k {
-		case "CB_NAME":
+		case "PB_NAME":
 			return "x"
-		case "CB_IDENTITY", "CB_HUB_PUB":
+		case "PB_IDENTITY", "PB_HUB_PUB":
 			return "unused"
 		}
 		return getenv(k)
@@ -230,7 +230,7 @@ func serve(args []string, getenv func(string) string) int {
 				}
 				acfg.AlarmCode = v
 			} else {
-				log.Warn("no CB_ALARM_SECRET_FILE: anyone who controls the chat can disarm the alarm")
+				log.Warn("no PB_ALARM_SECRET_FILE: anyone who controls the chat can disarm the alarm")
 			}
 			log.Info("alarm available", "armed", al.Armed(), "code_to_disarm", cfg.AlarmSecret != nil)
 		} else {

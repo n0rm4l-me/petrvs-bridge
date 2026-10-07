@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"claudebridge/internal/wire"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
 )
 
 // MaxFiles bounds how much a runaway writer can queue.

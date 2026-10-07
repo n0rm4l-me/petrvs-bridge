@@ -26,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	"claudebridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
 )
 
 const (
@@ -95,7 +95,7 @@ func lp(buf *bytes.Buffer, b []byte) {
 
 func (m *Message) signedBytes() []byte {
 	var buf bytes.Buffer
-	buf.WriteString("claudebridge handshake v1\x00")
+	buf.WriteString("petrvs-bridge handshake v1\x00")
 	buf.WriteByte(byte(m.V))
 	lp(&buf, []byte(m.Kind))
 	lp(&buf, []byte(m.From))
@@ -167,12 +167,12 @@ func deriveKey(secrets [][]byte, kemSecret []byte, hello, ack *Message) (key [32
 		ikm = append(ikm, s...)
 	}
 	ikm = append(ikm, kemSecret...)
-	out, err := hkdf.Key(sha256.New, ikm, salt[:], "claudebridge session v1", 32)
+	out, err := hkdf.Key(sha256.New, ikm, salt[:], "petrvs-bridge session v1", 32)
 	if err != nil {
 		return key, sid, err
 	}
 	copy(key[:], out)
-	h := sha256.Sum256(append([]byte("claudebridge session id v1"), transcript...))
+	h := sha256.Sum256(append([]byte("petrvs-bridge session id v1"), transcript...))
 	copy(sid[:], h[:8])
 	return key, sid, nil
 }

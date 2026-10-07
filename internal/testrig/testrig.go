@@ -13,15 +13,15 @@ import (
 	"testing"
 	"time"
 
-	"claudebridge/internal/agentsvc"
-	"claudebridge/internal/alarm"
-	"claudebridge/internal/approval"
-	"claudebridge/internal/hubsvc"
-	"claudebridge/internal/identity"
-	"claudebridge/internal/spool"
-	"claudebridge/internal/telegram"
-	"claudebridge/internal/transport"
-	"claudebridge/internal/wire"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/agentsvc"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/alarm"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/approval"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/hubsvc"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/spool"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/telegram"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/transport"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
 )
 
 const (
@@ -90,7 +90,7 @@ func (e *Exec) Keys() []string {
 type Options struct {
 	Agents    []string // default: one agent named "laptop"
 	Transport transport.Transport
-	// Prefix names the topics; required when Transport is shared, defaults to "cb".
+	// Prefix names the topics; required when Transport is shared, defaults to "pb".
 	Prefix string
 	// Clock, if set, is used by the hub and every agent.
 	Clock *Clock
@@ -111,6 +111,8 @@ type Options struct {
 	ReorderWindow time.Duration
 	// HubLockFile gives the hub a lock file, so a lockdown survives StartHub.
 	HubLockFile bool
+	// ReceivedReaction and DeliveredReaction are the hub's marks on the user's messages; empty means none.
+	ReceivedReaction, DeliveredReaction string
 }
 
 // Sensor is an alarm sensor the test triggers by hand.
@@ -170,7 +172,7 @@ type Rig struct {
 }
 
 func quietLog() *slog.Logger {
-	if os.Getenv("CB_TEST_LOG") != "" {
+	if os.Getenv("PB_TEST_LOG") != "" {
 		return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	return slog.New(slog.NewTextHandler(discard{}, nil))
@@ -192,7 +194,7 @@ func New(t *testing.T, o Options) *Rig {
 	}
 	r.Names = wire.Names{Prefix: o.Prefix}
 	if r.Names.Prefix == "" {
-		r.Names.Prefix = "cb"
+		r.Names.Prefix = "pb"
 	}
 	var err error
 	if r.HubID, err = identity.Generate("hub"); err != nil {
@@ -251,7 +253,7 @@ func New(t *testing.T, o Options) *Rig {
 	r.hubCfg = hubsvc.Config{
 		Identity: r.HubID, Agents: pubs, Transport: r.Bus, Names: r.Names, Telegram: r.TG, ChatID: ChatID, UserID: UserID, Log: quietLog(),
 		OfflineAfter: 500 * time.Millisecond * r.mult, WatchEvery: 40 * time.Millisecond * r.mult, HelloMinInterval: 20 * time.Millisecond,
-		PollTimeout: 150 * time.Millisecond,
+		PollTimeout: 150 * time.Millisecond, ReceivedReaction: o.ReceivedReaction, DeliveredReaction: o.DeliveredReaction,
 	}
 	if o.OfflineAfter > 0 {
 		r.hubCfg.OfflineAfter = o.OfflineAfter
@@ -375,9 +377,31 @@ func (r *Rig) WaitConnected(name string) {
 	r.Eventually(name+" to connect", func() bool { return r.Agents[name].Agent.Connected() && r.Hub.Online(name) })
 }
 
-// Say types a message as the authorised user.
-func (r *Rig) Say(text string) {
-	r.TG.Push(telegram.Update{ID: nextID(), ChatID: ChatID, UserID: UserID, Text: text})
+// Say types a message as the authorised user and returns the id the chat gave it.
+func (r *Rig) Say(text string) int64 {
+	id := nextID()
+	r.TG.Push(telegram.Update{ID: id, ChatID: ChatID, UserID: UserID, MessageID: 100000 + id, Text: text})
+	return 100000 + id
+}
+
+// SayReplyTo types a message as a reply to an earlier message of the chat (a swipe-reply).
+func (r *Rig) SayReplyTo(text string, replyTo int64) {
+	r.TG.Push(telegram.Update{ID: nextID(), ChatID: ChatID, UserID: UserID, Text: text, ReplyToID: replyTo})
+}
+
+// Press taps an inline button that carries the given data, as the authorised user.
+func (r *Rig) Press(data string) {
+	r.TG.Push(telegram.Update{ID: nextID(), ChatID: ChatID, UserID: UserID, CallbackID: fmt.Sprintf("cb%d", nextID()), CallbackData: data})
+}
+
+// MessageID returns the id the chat gave to the first message the hub sent that contains the substring, 0 if none.
+func (r *Rig) MessageID(sub string) int64 {
+	for _, s := range r.TG.Sent() {
+		if strings.Contains(s.Text, sub) {
+			return s.ID
+		}
+	}
+	return 0
 }
 
 // SayAt types a message that Telegram received at the given time, which may be long ago (a backlog after an outage).
@@ -439,7 +463,7 @@ func Emulator(t *testing.T, agents ...string) (*transport.PubSub, string) {
 		agents = []string{"laptop"}
 	}
 	ctx := context.Background()
-	p, err := transport.NewPubSub(ctx, "cb-test")
+	p, err := transport.NewPubSub(ctx, "pb-test")
 	if err != nil {
 		t.Fatal(err)
 	}

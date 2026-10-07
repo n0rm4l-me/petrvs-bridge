@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"claudebridge/internal/wire"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
 )
 
 func open(t *testing.T) *Spool {

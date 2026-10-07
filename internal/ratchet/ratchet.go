@@ -178,7 +178,7 @@ func NewResponder(sessionKey [keyLen]byte, ownRatchetKey *ecdh.PrivateKey) *Ratc
 }
 
 func kdfRK(rk [keyLen]byte, dh []byte) (newRK, ck [keyLen]byte) {
-	out, err := hkdf.Key(sha256.New, dh, rk[:], "claudebridge ratchet root v1", 2*keyLen)
+	out, err := hkdf.Key(sha256.New, dh, rk[:], "petrvs-bridge ratchet root v1", 2*keyLen)
 	if err != nil {
 		panic(err) // cannot happen: the output length is within the HKDF limit
 	}
@@ -198,7 +198,7 @@ func kdfCK(ck [keyLen]byte) (next, mk [keyLen]byte) {
 }
 
 func aeadFor(mk [keyLen]byte) (cipher.AEAD, []byte) {
-	out, err := hkdf.Key(sha256.New, mk[:], nil, "claudebridge message v1", keyLen+12)
+	out, err := hkdf.Key(sha256.New, mk[:], nil, "petrvs-bridge message v1", keyLen+12)
 	if err != nil {
 		panic(err)
 	}

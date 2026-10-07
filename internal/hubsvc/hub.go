@@ -22,12 +22,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"claudebridge/internal/handshake"
-	"claudebridge/internal/identity"
-	"claudebridge/internal/ratchet"
-	"claudebridge/internal/telegram"
-	"claudebridge/internal/transport"
-	"claudebridge/internal/wire"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/handshake"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/ratchet"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/telegram"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/transport"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
 )
 
 // Config holds everything a hub needs.
@@ -48,7 +48,18 @@ type Config struct {
 	KeyTTL           time.Duration // default 1m
 	HelloMinInterval time.Duration // default 3s per agent
 	PollTimeout      time.Duration // default 25s
+	MenuRetry        time.Duration // first wait before publishing the command menu again after a failure, default 5s
 	MaxReplyBytes    int           // default 20000
+	// DefaultAgent is where plain text goes until the user picks an agent. With several agents and no default, the hub
+	// asks first instead of guessing, so that an answer typed after a hub restart cannot end up on the wrong machine.
+	// With a single agent that agent is always the active one.
+	DefaultAgent string
+	// DeliveredReaction replaces the mark when the agent reports that it typed the command into the session. Empty
+	// means the mark stays as it is.
+	DeliveredReaction string
+	// ReceivedReaction is the emoji the hub puts on a message of the authorised user as soon as it has read it, so the
+	// user sees that the hub got it. Empty means no mark.
+	ReceivedReaction string
 	// LockFile, if set, keeps a lockdown across restarts of the hub: it exists while the hub is locked down.
 	LockFile string
 }
@@ -95,6 +106,18 @@ type Hub struct {
 	lastUnauthLog    time.Time
 	unauthSuppressed int
 
+	reactQ chan mark // marks waiting to be put on messages; nil when marking is off
+
+	// cmdMsg remembers, for the commands the hub sent, the chat message they came from and the agent they went to, so
+	// that the agent's report that it typed the command can mark that message. cmdRing bounds it, oldest first.
+	cmdMsg  map[string]sentCommand
+	cmdRing []string
+
+	// msgAgent remembers which agent the last messages in the chat came from, so that a reply to one of them goes to
+	// that agent. msgRing keeps their order, oldest first, and bounds the map.
+	msgAgent map[int64]string
+	msgRing  []int64
+
 	unauthorized, rejected, hellos, hellosRefused, relayed atomic.Uint64
 }
 
@@ -126,10 +149,14 @@ func New(cfg Config) (*Hub, error) {
 	def(&cfg.KeyTTL, time.Minute)
 	def(&cfg.HelloMinInterval, 3*time.Second)
 	def(&cfg.PollTimeout, 25*time.Second)
+	def(&cfg.MenuRetry, 5*time.Second)
 	if cfg.MaxReplyBytes <= 0 {
 		cfg.MaxReplyBytes = 20000
 	}
-	h := &Hub{cfg: cfg, log: cfg.Log.With("role", "hub"), guard: handshake.NewGuardPerSender(4096, 128), agents: map[string]*agentState{}}
+	h := &Hub{cfg: cfg, log: cfg.Log.With("role", "hub"), guard: handshake.NewGuardPerSender(4096, 128), agents: map[string]*agentState{}, msgAgent: map[int64]string{}, cmdMsg: map[string]sentCommand{}}
+	if _, ok := cfg.Telegram.(telegram.Reactor); ok && (cfg.ReceivedReaction != "" || cfg.DeliveredReaction != "") {
+		h.reactQ = make(chan mark, maxMarksQueued)
+	}
 	if cfg.LockFile != "" {
 		if _, err := os.Stat(cfg.LockFile); err == nil {
 			h.locked = true // a lockdown survives a restart; only /unlock ends it
@@ -145,7 +172,15 @@ func New(cfg Config) (*Hub, error) {
 		h.agents[p.Name] = &agentState{pub: p, seenIDs: map[string]struct{}{}}
 	}
 	names := h.agentNames()
-	h.active = names[0]
+	switch {
+	case cfg.DefaultAgent != "":
+		if _, ok := h.agents[cfg.DefaultAgent]; !ok {
+			return nil, fmt.Errorf("hubsvc: default agent %q is not one of the pinned agents", cfg.DefaultAgent)
+		}
+		h.active = cfg.DefaultAgent
+	case len(names) == 1:
+		h.active = names[0]
+	}
 	return h, nil
 }
 
@@ -184,6 +219,10 @@ func (h *Hub) Run(ctx context.Context) error {
 	defer cancel()
 	errc := make(chan error, 1)
 	go func() { errc <- h.cfg.Transport.Receive(ctx, h.cfg.Names.HubSub(), h.onBus) }()
+	go h.publishMenu(ctx)
+	if h.reactQ != nil {
+		go h.markLoop(ctx)
+	}
 	go h.telegramLoop(ctx)
 	go h.watchLoop(ctx)
 	select {
@@ -194,17 +233,198 @@ func (h *Hub) Run(ctx context.Context) error {
 	}
 }
 
+// menu is the list Telegram shows when the user types "/". It holds what is used all the time. Commands that need an
+// argument (/key N) are left out, since a tap sends the bare command, and so are the keys that are rarely needed
+// (/up /down /tab); they work when typed, and /help lists everything.
+var menu = []telegram.Command{
+	{Name: "status", Description: "Agents: online or offline, last heard"},
+	{Name: "agent", Description: "Choose which agent gets your text (buttons)"},
+	{Name: "enter", Description: "Press Enter in the session"},
+	{Name: "esc", Description: "Press Escape"},
+	{Name: "alarm", Description: "Alarm status; /alarm on, /alarm off [code]"},
+	{Name: "lockdown", Description: "Stop relaying and lock the agents until unlocked on their machine"},
+	{Name: "unlock", Description: "Relay again (locked agents stay locked)"},
+	{Name: "help", Description: "List of commands"},
+}
+
+const helpText = "Known: /agents /agent [NAME] /enter /esc /up /down /tab /key N /alarm on|off|status /lockdown /unlock, @name text (also @name /enter), or answer a message of an agent to write to that agent."
+
+// publishMenu shows the commands in the chat's "/" menu. A failure is not fatal (the commands work without the menu);
+// it is tried again with growing waits until it works.
+func (h *Hub) publishMenu(ctx context.Context) {
+	m, ok := h.cfg.Telegram.(telegram.CommandMenu)
+	if !ok {
+		return
+	}
+	wait := h.cfg.MenuRetry
+	for ctx.Err() == nil {
+		err := m.SetCommands(ctx, menu)
+		if err == nil {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		h.log.Warn("could not publish the command menu", "err", err)
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return
+		}
+		if wait < 5*time.Minute {
+			wait *= 2
+		}
+	}
+}
+
+// maxMarksQueued bounds the messages waiting for their mark. The marks are a courtesy: when Telegram is slow the extra
+// ones are dropped, and the hub never waits for them before it acts on a message.
+const maxMarksQueued = 64
+
+// mark is one reaction to put on one chat message.
+type mark struct {
+	messageID int64
+	emoji     string
+}
+
+// sentCommand is a command the hub relayed: who got it and which chat message it came from.
+type sentCommand struct {
+	agent     string
+	messageID int64
+}
+
+// maxTrackedCommands bounds how many relayed commands wait for their report.
+const maxTrackedCommands = 256
+
+// enqueueMark asks for a mark on a message; it never blocks.
+func (h *Hub) enqueueMark(messageID int64, emoji string) {
+	if h.reactQ == nil || messageID == 0 || emoji == "" {
+		return
+	}
+	select {
+	case h.reactQ <- mark{messageID, emoji}:
+	default:
+	}
+}
+
+// markReceived marks a message of the authorised user as read.
+func (h *Hub) markReceived(messageID int64) { h.enqueueMark(messageID, h.cfg.ReceivedReaction) }
+
+// rememberCommand notes which chat message a relayed command came from.
+func (h *Hub) rememberCommand(agent, commandID string, messageID int64) {
+	if h.reactQ == nil || h.cfg.DeliveredReaction == "" || messageID == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cmdMsg[commandID] = sentCommand{agent, messageID}
+	h.cmdRing = append(h.cmdRing, commandID)
+	for len(h.cmdRing) > maxTrackedCommands {
+		delete(h.cmdMsg, h.cmdRing[0])
+		h.cmdRing = h.cmdRing[1:]
+	}
+}
+
+// markDelivered puts the delivered mark on the message a command came from, when the agent that got the command says it
+// carried it out. A report from another agent, or about an unknown command, changes nothing.
+func (h *Hub) markDelivered(agent, commandID string) {
+	h.mu.Lock()
+	c, ok := h.cmdMsg[commandID]
+	if ok && c.agent == agent {
+		delete(h.cmdMsg, commandID) // the ring entry goes when it ages out
+	}
+	h.mu.Unlock()
+	if ok && c.agent == agent {
+		h.enqueueMark(c.messageID, h.cfg.DeliveredReaction)
+	}
+}
+
+// markLoop puts the queued marks on messages, one at a time. A reaction Telegram refuses is refused every time (the set
+// of emoji it accepts is fixed), so after the first such answer for an emoji the loop reports it once and skips it from
+// then on; the other emoji keep working.
+func (h *Hub) markLoop(ctx context.Context) {
+	r := h.cfg.Telegram.(telegram.Reactor)
+	refused := map[string]bool{}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case m := <-h.reactQ:
+			if refused[m.emoji] {
+				continue
+			}
+			err := r.React(ctx, h.cfg.ChatID, m.messageID, m.emoji)
+			switch {
+			case err == nil, ctx.Err() != nil:
+			case strings.Contains(err.Error(), "REACTION_INVALID"):
+				refused[m.emoji] = true
+				h.log.Warn("Telegram does not accept this reaction, it will not be used; choose another one in the settings", "reaction", m.emoji)
+			default:
+				h.log.Warn("could not mark a message", "err", err)
+			}
+		}
+	}
+}
+
 func (h *Hub) say(ctx context.Context, text string) { h.sayErr(ctx, text) }
 
 func (h *Hub) sayErr(ctx context.Context, text string) error {
-	if len(text) > h.cfg.MaxReplyBytes {
-		text = text[:h.cfg.MaxReplyBytes] + fmt.Sprintf("\n[cut: %d more bytes]", len(text)-h.cfg.MaxReplyBytes)
-	}
-	err := h.cfg.Telegram.Send(ctx, h.cfg.ChatID, text)
-	if err != nil && ctx.Err() == nil {
-		h.log.Warn("could not send to chat", "err", err)
-	}
+	_, err := h.send(ctx, telegram.Message{Text: text})
 	return err
+}
+
+// send writes to the chat, cutting a text that is too long, and returns the ids of what was sent.
+func (h *Hub) send(ctx context.Context, m telegram.Message) ([]int64, error) {
+	if len(m.Text) > h.cfg.MaxReplyBytes {
+		m.Text = m.Text[:h.cfg.MaxReplyBytes] + fmt.Sprintf("\n[cut: %d more bytes]", len(m.Text)-h.cfg.MaxReplyBytes)
+	}
+	ids, err := h.cfg.Telegram.SendMessage(ctx, h.cfg.ChatID, m)
+	switch {
+	case err != nil && ctx.Err() == nil:
+		h.log.Warn("could not send to chat", "err", err)
+	case err == nil:
+		h.log.Debug("sent to chat", "parts", len(ids), "bytes", len(m.Text))
+	}
+	return ids, err
+}
+
+// sayAs writes something that an agent said, or that is about one, and remembers it: a reply to that message in the
+// chat is then sent to that agent.
+func (h *Hub) sayAs(ctx context.Context, agent, text string) error {
+	ids, err := h.send(ctx, telegram.Message{Text: text})
+	h.track(agent, ids)
+	return err
+}
+
+// maxTrackedMessages bounds how many chat messages are remembered for reply routing.
+const maxTrackedMessages = 512
+
+func (h *Hub) track(agent string, ids []int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, ok := h.msgAgent[id]; !ok {
+			h.msgRing = append(h.msgRing, id)
+		}
+		h.msgAgent[id] = agent
+	}
+	for len(h.msgRing) > maxTrackedMessages {
+		delete(h.msgAgent, h.msgRing[0])
+		h.msgRing = h.msgRing[1:]
+	}
+}
+
+// agentOfMessage returns the agent a chat message came from, "" when it is not one the hub remembers.
+func (h *Hub) agentOfMessage(id int64) string {
+	if id == 0 {
+		return ""
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.msgAgent[id]
 }
 
 func (h *Hub) tag(name string) string {
@@ -241,14 +461,19 @@ func (h *Hub) telegramLoop(ctx context.Context) {
 			if u.ID >= offset {
 				offset = u.ID + 1
 			}
-			if u.Text == "" {
+			if u.Text == "" && u.CallbackID == "" {
 				continue
 			}
 			if u.ChatID != h.cfg.ChatID || u.UserID != h.cfg.UserID {
 				h.noteUnauthorized(u.ChatID, u.UserID)
 				continue
 			}
-			h.handle(ctx, u.Text, u.Date)
+			if u.CallbackID != "" {
+				h.tap(ctx, u)
+				continue
+			}
+			h.markReceived(u.MessageID)
+			h.handleTo(ctx, u.Text, u.Date, h.agentOfMessage(u.ReplyToID), u.MessageID)
 		}
 	}
 }
@@ -284,6 +509,19 @@ func (h *Hub) stale(sentAt time.Time, ttl time.Duration) bool {
 }
 
 func (h *Hub) handle(ctx context.Context, text string, sentAt time.Time) {
+	h.handleTo(ctx, text, sentAt, "", 0)
+}
+
+// targeted says whether a command acts on one agent (as opposed to the hub itself).
+func targeted(cmd string) bool {
+	_, isKey := keyCommands[cmd]
+	return isKey || cmd == "/key" || cmd == "/alarm"
+}
+
+// handleTo interprets one message. replyTo is the agent whose message this one answers in the chat, "" when it
+// answers none; it decides where text and key commands go, unless the message names an agent itself with @name.
+// msgID is the id of the chat message (0 when unknown); it lets the hub mark that message as delivered later.
+func (h *Hub) handleTo(ctx context.Context, text string, sentAt time.Time, replyTo string, msgID int64) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
@@ -295,26 +533,38 @@ func (h *Hub) handle(ctx context.Context, text string, sentAt time.Time) {
 			h.say(ctx, "Use @name text, with the name of a known agent. /agents lists them.")
 			return
 		}
-		h.deliver(ctx, name, wire.TypeText, rest, h.cfg.TextTTL, sentAt)
+		// "@name /enter" presses the key on that agent. Any other text, also one that starts with a slash (an
+		// assistant's own command such as /compact), is typed as it is.
+		if word, arg, _ := strings.Cut(rest, " "); targeted(strings.ToLower(word)) {
+			h.runTargeted(ctx, name, strings.ToLower(word), strings.TrimSpace(arg), sentAt, msgID)
+			return
+		}
+		h.deliver(ctx, name, wire.TypeText, rest, h.cfg.TextTTL, sentAt, msgID)
 		return
 	}
 	if !strings.HasPrefix(text, "/") {
-		h.deliver(ctx, h.activeName(), wire.TypeText, text, h.cfg.TextTTL, sentAt)
+		if agent, ok := h.destination(ctx, replyTo); ok {
+			h.deliver(ctx, agent, wire.TypeText, text, h.cfg.TextTTL, sentAt, msgID)
+		}
 		return
 	}
 	cmd, arg, _ := strings.Cut(text, " ")
 	arg = strings.TrimSpace(arg)
 	cmd = strings.ToLower(cmd)
-	if key, ok := keyCommands[cmd]; ok {
-		h.deliver(ctx, h.activeName(), wire.TypeKey, key, h.cfg.KeyTTL, sentAt)
+	if targeted(cmd) {
+		if agent, ok := h.destination(ctx, replyTo); ok {
+			h.runTargeted(ctx, agent, cmd, arg, sentAt, msgID)
+		}
 		return
 	}
 	switch cmd {
-	case "/key":
-		h.deliver(ctx, h.activeName(), wire.TypeKey, arg, h.cfg.KeyTTL, sentAt)
 	case "/agents", "/status":
-		h.say(ctx, h.statusText())
+		h.showAgents(ctx, h.statusText())
 	case "/agent":
+		if arg == "" {
+			h.showAgents(ctx, h.activeText())
+			return
+		}
 		if h.stale(sentAt, h.cfg.KeyTTL) {
 			h.say(ctx, "⚠️ Ignored an old /agent command.")
 			return
@@ -323,15 +573,8 @@ func (h *Hub) handle(ctx context.Context, text string, sentAt time.Time) {
 			h.say(ctx, "Unknown agent. /agents lists them.")
 			return
 		}
-		h.mu.Lock()
-		h.active = arg
-		h.mu.Unlock()
+		h.setActive(arg)
 		h.say(ctx, "Active agent: "+arg)
-	case "/alarm":
-		if arg == "" {
-			arg = "status"
-		}
-		h.deliver(ctx, h.activeName(), wire.TypeAlarm, arg, h.cfg.KeyTTL, sentAt)
 	case "/lockdown": // never stale: locking is always the safe direction
 		h.lockdown(ctx)
 	case "/unlock":
@@ -348,9 +591,109 @@ func (h *Hub) handle(ctx context.Context, text string, sentAt time.Time) {
 			}
 		}
 		h.say(ctx, "The hub relays again. Agents that were locked stay locked until someone unlocks them on their own machine.")
+	case "/start", "/help":
+		h.say(ctx, helpText)
 	default:
-		h.say(ctx, "Unknown command. Known: /agents /agent NAME /enter /esc /up /down /tab /key N /alarm on|off|status /lockdown /unlock, or @name text.")
+		h.say(ctx, "Unknown command. "+helpText)
 	}
+}
+
+// runTargeted carries out a key press or an alarm command on one agent.
+func (h *Hub) runTargeted(ctx context.Context, agent, cmd, arg string, sentAt time.Time, msgID int64) {
+	if key, ok := keyCommands[cmd]; ok {
+		h.deliver(ctx, agent, wire.TypeKey, key, h.cfg.KeyTTL, sentAt, msgID)
+		return
+	}
+	switch cmd {
+	case "/key":
+		h.deliver(ctx, agent, wire.TypeKey, arg, h.cfg.KeyTTL, sentAt, msgID)
+	case "/alarm":
+		if arg == "" {
+			arg = "status"
+		}
+		h.deliver(ctx, agent, wire.TypeAlarm, arg, h.cfg.KeyTTL, sentAt, 0)
+	}
+}
+
+// destination decides which agent a message without @name goes to: the one whose message it answers, else the active
+// one. With several agents and none active it asks the user to choose and reports false, so nothing is sent.
+func (h *Hub) destination(ctx context.Context, replyTo string) (string, bool) {
+	active := h.activeName()
+	if replyTo != "" {
+		if replyTo != active {
+			h.say(ctx, "→ "+replyTo+" (you answered its message)")
+		}
+		h.log.Debug("destination", "agent", replyTo, "via", "reply", "active", active)
+		return replyTo, true
+	}
+	if active == "" {
+		h.log.Debug("destination", "agent", "", "via", "none chosen")
+		h.showAgents(ctx, "No agent is chosen yet, so nothing was sent. Choose one, or write @name text.")
+		return "", false
+	}
+	h.log.Debug("destination", "agent", active, "via", "active")
+	return active, true
+}
+
+func (h *Hub) setActive(name string) {
+	h.mu.Lock()
+	h.active = name
+	h.mu.Unlock()
+}
+
+// agentPrefix is what a tap on an agent button sends back.
+const agentPrefix = "agent:"
+
+// agentButtons is one button per agent, the active one marked; none when there is only one agent to choose from.
+func (h *Hub) agentButtons() [][]telegram.Button {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.agents) < 2 {
+		return nil
+	}
+	var rows [][]telegram.Button
+	for _, n := range h.agentNames() {
+		label := n
+		if n == h.active {
+			label = "● " + n
+		}
+		rows = append(rows, []telegram.Button{{Text: label, Data: agentPrefix + n}})
+	}
+	return rows
+}
+
+// showAgents writes text with the agent buttons under it.
+func (h *Hub) showAgents(ctx context.Context, text string) {
+	h.send(ctx, telegram.Message{Text: text, Buttons: h.agentButtons()})
+}
+
+// activeText says where plain text goes now.
+func (h *Hub) activeText() string {
+	if a := h.activeName(); a != "" {
+		return "Active agent: " + a
+	}
+	return "No agent is chosen yet. Choose one with the buttons or /agent NAME."
+}
+
+// tap handles a press on one of the agent buttons. The sender was checked by the caller.
+func (h *Hub) tap(ctx context.Context, u telegram.Update) {
+	answer := func(text string) {
+		if err := h.cfg.Telegram.AnswerCallback(ctx, u.CallbackID, text); err != nil && ctx.Err() == nil {
+			h.log.Warn("could not answer a button press", "err", err)
+		}
+	}
+	name, ok := strings.CutPrefix(u.CallbackData, agentPrefix)
+	if !ok {
+		answer("")
+		return
+	}
+	if _, known := h.lookup(name); !known {
+		answer("Unknown agent")
+		return
+	}
+	h.setActive(name)
+	answer("Active agent: " + name)
+	h.say(ctx, "Active agent: "+name)
 }
 
 func (h *Hub) lookup(name string) (*agentState, bool) {
@@ -395,6 +738,9 @@ func (h *Hub) statusText() string {
 		}
 		b.WriteByte('\n')
 	}
+	if h.active == "" {
+		b.WriteString("No agent is chosen yet: pick one with /agent NAME or the buttons.\n")
+	}
 	if h.locked {
 		b.WriteString("Hub is in lockdown: nothing is relayed.\n")
 	}
@@ -409,7 +755,7 @@ func newID() string {
 
 // deliver seals a command for one agent and publishes it. The command is valid for ttl from the moment the user typed
 // it (sentAt, or now when that is unknown), so time spent in the chat's queue counts against it.
-func (h *Hub) deliver(ctx context.Context, agent string, t wire.Type, body string, ttl time.Duration, sentAt time.Time) {
+func (h *Hub) deliver(ctx context.Context, agent string, t wire.Type, body string, ttl time.Duration, sentAt time.Time, msgID int64) {
 	now := h.cfg.Now()
 	if sentAt.IsZero() || sentAt.After(now) {
 		sentAt = now
@@ -466,6 +812,10 @@ func (h *Hub) deliver(ctx context.Context, agent string, t wire.Type, body strin
 		return
 	}
 	h.relayed.Add(1)
+	h.log.Debug("relayed", "agent", agent, "type", string(t), "id", p.ID)
+	if t == wire.TypeText || t == wire.TypeKey {
+		h.rememberCommand(agent, p.ID, msgID)
+	}
 }
 
 func (h *Hub) lockdown(ctx context.Context) {
@@ -657,7 +1007,7 @@ func (h *Hub) onMsg(ctx context.Context, m *transport.Message) {
 	switch p.Type {
 	case wire.TypeReady:
 		if comeback || first {
-			h.say(ctx, "✅ "+name+" is connected.")
+			h.sayAs(ctx, name, "✅ "+name+" is connected.")
 		}
 		h.ackHeartbeat(ctx, name, s) // tells the agent the session works, so it stops repeating "ready"
 	case wire.TypeHeartbeat:
@@ -665,7 +1015,7 @@ func (h *Hub) onMsg(ctx context.Context, m *transport.Message) {
 		st.info = p.Meta
 		h.mu.Unlock()
 		if comeback {
-			h.say(ctx, "✅ "+name+" is back.")
+			h.sayAs(ctx, name, "✅ "+name+" is back.")
 		}
 		h.ackHeartbeat(ctx, name, s)
 	case wire.TypeReply, wire.TypeNotice, wire.TypeAlert:
@@ -674,13 +1024,15 @@ func (h *Hub) onMsg(ctx context.Context, m *transport.Message) {
 		if p.Type == wire.TypeAlert {
 			text = "🚨 ALARM " + text
 		}
-		if err := h.sayErr(ctx, text); err == nil {
+		if err := h.sayAs(ctx, name, text); err == nil {
 			h.markSeen(st, p.ID)
 			h.receipt(ctx, name, s, p.ID)
 		}
 		return
+	case wire.TypeDone:
+		h.markDelivered(name, p.Body)
 	case wire.TypeDropped:
-		h.say(ctx, "⚠️ "+h.tag(name)+p.Body)
+		h.sayAs(ctx, name, "⚠️ "+h.tag(name)+p.Body)
 	}
 	h.markSeen(st, p.ID)
 }
@@ -740,7 +1092,8 @@ func (h *Hub) watchLoop(ctx context.Context) {
 }
 
 func (h *Hub) checkOffline(ctx context.Context) {
-	var notify []string
+	type notice struct{ agent, text string }
+	var notify []notice
 	h.mu.Lock()
 	now := h.cfg.Now()
 	for n, st := range h.agents {
@@ -750,12 +1103,12 @@ func (h *Hub) checkOffline(ctx context.Context) {
 			if st.info["alarm"] == "on" {
 				msg = "🚨 " + msg + " Its alarm was armed."
 			}
-			notify = append(notify, msg)
+			notify = append(notify, notice{n, msg})
 		}
 	}
 	h.mu.Unlock()
-	sort.Strings(notify)
-	for _, text := range notify {
-		h.say(ctx, text)
+	sort.Slice(notify, func(i, j int) bool { return notify[i].text < notify[j].text })
+	for _, n := range notify {
+		h.sayAs(ctx, n.agent, n.text)
 	}
 }

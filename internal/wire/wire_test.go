@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"claudebridge/internal/ratchet"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/ratchet"
 )
 
 func pair(t testing.TB) (agent, hub *ratchet.Ratchet) {
@@ -149,5 +149,26 @@ func TestAttrs(t *testing.T) {
 	a := Attrs(KindMsg, "laptop")
 	if a[AttrKind] != KindMsg || a[AttrAgent] != "laptop" || a[AttrVersion] != "1" {
 		t.Fatalf("%v", a)
+	}
+}
+
+func TestADoneReportTravelsOnlyFromTheAgentToTheHub(t *testing.T) {
+	agent, hub := pair(t)
+	data, err := Seal(agent, "laptop", "hub", sid, p(TypeDone, "cmd-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Open(hub, "laptop", "hub", sid, data, true)
+	if err != nil || got.Type != TypeDone || got.Body != "cmd-1" {
+		t.Fatalf("%v %+v", err, got)
+	}
+	agent2, hub2 := pair(t)
+	m, _ := Seal(agent2, "laptop", "hub", sid, p(TypeReady, ""))
+	Open(hub2, "laptop", "hub", sid, m, true)
+	back, err := Seal(hub2, "hub", "laptop", sid, p(TypeDone, "x"))
+	if err == nil {
+		if _, err = Open(agent2, "hub", "laptop", sid, back, false); !errors.Is(err, ErrPayload) {
+			t.Fatalf("a done report was accepted in the command direction: %v", err)
+		}
 	}
 }

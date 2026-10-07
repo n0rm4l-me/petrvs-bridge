@@ -15,8 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
-	"claudebridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
 )
 
 // Common settings shared by hub and agent.
@@ -45,6 +46,13 @@ type Hub struct {
 	PollTimeout   time.Duration
 	MaxReplyBytes int
 	LockFile      string // keeps a lockdown across restarts of the hub; empty means it does not
+	// DefaultAgent is where plain text goes until the user picks an agent. Empty means: ask first (with one agent, that
+	// agent is used).
+	DefaultAgent string
+	// ReceivedReaction is the emoji put on each message of the user once the hub has read it; empty means no mark.
+	ReceivedReaction string
+	// DeliveredReaction replaces it when the agent has typed the command into the session; empty means it stays.
+	DeliveredReaction string
 }
 
 // Agent holds the agent's settings.
@@ -128,26 +136,46 @@ func readSecretFile(path string, allowGroupRead bool) (string, error) {
 }
 
 func stateDir(e *env) string {
-	if d := e.str("CB_STATE_DIR", ""); d != "" {
+	if d := e.str("PB_STATE_DIR", ""); d != "" {
 		return d
 	}
 	if d := e.get("XDG_STATE_HOME"); d != "" {
-		return filepath.Join(d, "claude-bridge")
+		return filepath.Join(d, "petrvs-bridge")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".claude-bridge"
+		return ".petrvs-bridge"
 	}
-	return filepath.Join(home, ".local", "state", "claude-bridge")
+	return filepath.Join(home, ".local", "state", "petrvs-bridge")
 }
 
 func common(fs *flag.FlagSet, e *env, c *Common) {
-	fs.StringVar(&c.Project, "project", e.str("CB_PROJECT", e.str("GOOGLE_CLOUD_PROJECT", "")), "Pub/Sub project id (env CB_PROJECT)")
-	fs.StringVar(&c.Prefix, "prefix", e.str("CB_PREFIX", "cb"), "topic/subscription name prefix (env CB_PREFIX)")
-	fs.StringVar(&c.Identity, "identity", e.str("CB_IDENTITY", ""), "path of the private identity file (env CB_IDENTITY)")
-	fs.StringVar(&c.LogLevel, "log-level", e.str("CB_LOG_LEVEL", "info"), "debug, info, warn or error (env CB_LOG_LEVEL)")
-	fs.BoolVar(&c.CreateResources, "create-resources", e.boolean("CB_CREATE_RESOURCES", false), "create topics and subscriptions; development and the emulator only (env CB_CREATE_RESOURCES)")
-	fs.BoolVar(&c.AllowGroupRead, "allow-group-read", e.boolean("CB_ALLOW_GROUP_READ", false), "accept private files that their group may read, for a Kubernetes secret volume with fsGroup (env CB_ALLOW_GROUP_READ)")
+	fs.StringVar(&c.Project, "project", e.str("PB_PROJECT", e.str("GOOGLE_CLOUD_PROJECT", "")), "Pub/Sub project id (env PB_PROJECT)")
+	fs.StringVar(&c.Prefix, "prefix", e.str("PB_PREFIX", "pb"), "topic/subscription name prefix (env PB_PREFIX)")
+	fs.StringVar(&c.Identity, "identity", e.str("PB_IDENTITY", ""), "path of the private identity file (env PB_IDENTITY)")
+	fs.StringVar(&c.LogLevel, "log-level", e.str("PB_LOG_LEVEL", "info"), "debug, info, warn or error (env PB_LOG_LEVEL)")
+	fs.BoolVar(&c.CreateResources, "create-resources", e.boolean("PB_CREATE_RESOURCES", false), "create topics and subscriptions; development and the emulator only (env PB_CREATE_RESOURCES)")
+	fs.BoolVar(&c.AllowGroupRead, "allow-group-read", e.boolean("PB_ALLOW_GROUP_READ", false), "accept private files that their group may read, for a Kubernetes secret volume with fsGroup (env PB_ALLOW_GROUP_READ)")
+}
+
+// checkReaction returns the emoji to use, or "" when marking is switched off. Telegram accepts only a fixed set of emoji
+// (the hub says so in its log if it refuses one), so this only catches what is clearly not an emoji: a plain word such as
+// "on" or "yes" is a typo, not a reaction.
+func checkReaction(e *env, key, v string) string {
+	v = strings.TrimSpace(v)
+	if strings.EqualFold(v, "off") {
+		return ""
+	}
+	ok := v != "" && len(v) <= 16 && utf8.ValidString(v)
+	for _, r := range v {
+		if r < 0x80 {
+			ok = false
+		}
+	}
+	if !ok {
+		e.err = append(e.err, fmt.Sprintf("%s: %q is not an emoji; use one such as 👀 or 👍, or off", key, v))
+	}
+	return v
 }
 
 // checkTelegramBase refuses a Bot API address that would send the bot token over plain HTTP to another machine.
@@ -172,10 +200,10 @@ func checkTelegramBase(e *env, base string) {
 
 func (c *Common) validate(e *env, needProject bool) {
 	if c.Identity == "" {
-		e.err = append(e.err, "identity: set CB_IDENTITY or -identity")
+		e.err = append(e.err, "identity: set PB_IDENTITY or -identity")
 	}
 	if needProject && c.Project == "" {
-		e.err = append(e.err, "project: set CB_PROJECT or -project (not needed with the emulator)")
+		e.err = append(e.err, "project: set PB_PROJECT or -project (not needed with the emulator)")
 	}
 	if !identity.ValidName(c.Prefix) {
 		e.err = append(e.err, "prefix: lower-case letters, digits, - and _")
@@ -203,18 +231,26 @@ func ParseHub(args []string, getenv func(string) string) (*Hub, error) {
 	fs := flag.NewFlagSet("hub", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	common(fs, e, &h.Common)
-	fs.StringVar(&h.AgentsDir, "agents-dir", e.str("CB_AGENTS_DIR", ""), "directory holding one *.pub.json per agent that may connect (env CB_AGENTS_DIR)")
-	fs.StringVar(&h.TelegramBase, "telegram-api", e.str("CB_TELEGRAM_API_BASE", "https://api.telegram.org"), "Bot API base URL (env CB_TELEGRAM_API_BASE)")
-	fs.Int64Var(&h.ChatID, "chat-id", e.int64("CB_CHAT_ID"), "the only chat that is obeyed (env CB_CHAT_ID)")
-	fs.Int64Var(&h.UserID, "user-id", e.int64("CB_USER_ID"), "the only user that is obeyed; defaults to the chat id (env CB_USER_ID)")
-	fs.DurationVar(&h.OfflineAfter, "offline-after", e.dur("CB_OFFLINE_AFTER", 3*time.Minute), "silence after which an agent is called offline (env CB_OFFLINE_AFTER)")
-	fs.DurationVar(&h.TextTTL, "text-ttl", e.dur("CB_TEXT_TTL", 10*time.Minute), "how long a text command stays valid (env CB_TEXT_TTL)")
-	fs.DurationVar(&h.KeyTTL, "key-ttl", e.dur("CB_KEY_TTL", time.Minute), "how long a key press or alarm command stays valid (env CB_KEY_TTL)")
-	fs.DurationVar(&h.PollTimeout, "poll-timeout", e.dur("CB_POLL_TIMEOUT", 25*time.Second), "Telegram long-poll timeout (env CB_POLL_TIMEOUT)")
-	fs.IntVar(&h.MaxReplyBytes, "max-reply-bytes", int(e.int64("CB_MAX_REPLY_BYTES")), "longest reply shown in the chat; 0 means 20000 (env CB_MAX_REPLY_BYTES)")
-	fs.StringVar(&h.LockFile, "lock-file", e.str("CB_LOCK_FILE", ""), "file that keeps a lockdown across restarts of the hub; empty means a restart ends it (env CB_LOCK_FILE)")
+	fs.StringVar(&h.AgentsDir, "agents-dir", e.str("PB_AGENTS_DIR", ""), "directory holding one *.pub.json per agent that may connect (env PB_AGENTS_DIR)")
+	fs.StringVar(&h.TelegramBase, "telegram-api", e.str("PB_TELEGRAM_API_BASE", "https://api.telegram.org"), "Bot API base URL (env PB_TELEGRAM_API_BASE)")
+	fs.Int64Var(&h.ChatID, "chat-id", e.int64("PB_CHAT_ID"), "the only chat that is obeyed (env PB_CHAT_ID)")
+	fs.Int64Var(&h.UserID, "user-id", e.int64("PB_USER_ID"), "the only user that is obeyed; defaults to the chat id (env PB_USER_ID)")
+	fs.DurationVar(&h.OfflineAfter, "offline-after", e.dur("PB_OFFLINE_AFTER", 3*time.Minute), "silence after which an agent is called offline (env PB_OFFLINE_AFTER)")
+	fs.DurationVar(&h.TextTTL, "text-ttl", e.dur("PB_TEXT_TTL", 10*time.Minute), "how long a text command stays valid (env PB_TEXT_TTL)")
+	fs.DurationVar(&h.KeyTTL, "key-ttl", e.dur("PB_KEY_TTL", time.Minute), "how long a key press or alarm command stays valid (env PB_KEY_TTL)")
+	fs.DurationVar(&h.PollTimeout, "poll-timeout", e.dur("PB_POLL_TIMEOUT", 25*time.Second), "Telegram long-poll timeout (env PB_POLL_TIMEOUT)")
+	fs.IntVar(&h.MaxReplyBytes, "max-reply-bytes", int(e.int64("PB_MAX_REPLY_BYTES")), "longest reply shown in the chat; 0 means 20000 (env PB_MAX_REPLY_BYTES)")
+	fs.StringVar(&h.LockFile, "lock-file", e.str("PB_LOCK_FILE", ""), "file that keeps a lockdown across restarts of the hub; empty means a restart ends it (env PB_LOCK_FILE)")
+	fs.StringVar(&h.DefaultAgent, "default-agent", e.str("PB_DEFAULT_AGENT", ""), "agent that gets plain text until you choose one; empty means the hub asks first when it has several (env PB_DEFAULT_AGENT)")
+	reaction := fs.String("received-reaction", e.str("PB_RECEIVED_REACTION", "👀"), "emoji put on each message of yours once the hub has read it, or off (env PB_RECEIVED_REACTION)")
+	delivered := fs.String("delivered-reaction", e.str("PB_DELIVERED_REACTION", "👍"), "emoji that replaces it once the agent has typed the text into the session, or off (env PB_DELIVERED_REACTION)")
 	if err := fs.Parse(args); err != nil {
 		return nil, fmt.Errorf("hub: %w", err)
+	}
+	h.ReceivedReaction = checkReaction(e, "PB_RECEIVED_REACTION", *reaction)
+	h.DeliveredReaction = checkReaction(e, "PB_DELIVERED_REACTION", *delivered)
+	if h.DefaultAgent != "" && !identity.ValidName(h.DefaultAgent) {
+		e.err = append(e.err, "default-agent: lower-case letters, digits, - and _")
 	}
 	if h.UserID == 0 {
 		h.UserID = h.ChatID
@@ -222,22 +258,22 @@ func ParseHub(args []string, getenv func(string) string) (*Hub, error) {
 	h.validate(e, !emulator(e))
 	checkTelegramBase(e, h.TelegramBase)
 	if h.AgentsDir == "" {
-		e.err = append(e.err, "agents-dir: set CB_AGENTS_DIR or -agents-dir")
+		e.err = append(e.err, "agents-dir: set PB_AGENTS_DIR or -agents-dir")
 	}
 	if h.ChatID == 0 {
-		e.err = append(e.err, "chat-id: set CB_CHAT_ID or -chat-id")
+		e.err = append(e.err, "chat-id: set PB_CHAT_ID or -chat-id")
 	}
 	switch {
 	case getenv("TELEGRAM_BOT_TOKEN") != "":
 		h.Token = strings.TrimSpace(getenv("TELEGRAM_BOT_TOKEN"))
-	case getenv("CB_TELEGRAM_TOKEN_FILE") != "":
-		tok, err := readSecretFile(getenv("CB_TELEGRAM_TOKEN_FILE"), h.AllowGroupRead)
+	case getenv("PB_TELEGRAM_TOKEN_FILE") != "":
+		tok, err := readSecretFile(getenv("PB_TELEGRAM_TOKEN_FILE"), h.AllowGroupRead)
 		if err != nil {
-			e.err = append(e.err, "CB_TELEGRAM_TOKEN_FILE: "+err.Error())
+			e.err = append(e.err, "PB_TELEGRAM_TOKEN_FILE: "+err.Error())
 		}
 		h.Token = tok
 	default:
-		e.err = append(e.err, "bot token: set TELEGRAM_BOT_TOKEN or CB_TELEGRAM_TOKEN_FILE (it is never accepted as a flag)")
+		e.err = append(e.err, "bot token: set TELEGRAM_BOT_TOKEN or PB_TELEGRAM_TOKEN_FILE (it is never accepted as a flag)")
 	}
 	return h, finish(e)
 }
@@ -250,38 +286,38 @@ func ParseAgent(args []string, getenv func(string) string) (*Agent, error) {
 	fs.SetOutput(io.Discard)
 	common(fs, e, &a.Common)
 	sd := stateDir(e)
-	fs.StringVar(&a.Name, "name", e.str("CB_NAME", ""), "this agent's name; must match its identity (env CB_NAME)")
-	fs.StringVar(&a.HubPub, "hub-pub", e.str("CB_HUB_PUB", ""), "path of the hub's public bundle, pinned at enrolment (env CB_HUB_PUB)")
-	fs.StringVar(&a.TmuxSession, "tmux-session", e.str("CB_TMUX_SESSION", "claude"), "tmux session that receives the text (env CB_TMUX_SESSION)")
-	fs.StringVar(&a.StateDir, "state-dir", sd, "directory for the spool, lock and alarm state (env CB_STATE_DIR)")
-	fs.BoolVar(&a.AlarmEnabled, "alarm", e.boolean("CB_ALARM", true), "offer the alarm mode (env CB_ALARM)")
-	fs.DurationVar(&a.AlarmCooldown, "alarm-cooldown", e.dur("CB_ALARM_COOLDOWN", time.Minute), "at most one report per sensor in this time (env CB_ALARM_COOLDOWN)")
-	fs.DurationVar(&a.AlarmPoll, "alarm-poll", e.dur("CB_ALARM_POLL", time.Second), "how often the sensors are read (env CB_ALARM_POLL)")
-	fs.DurationVar(&a.Heartbeat, "heartbeat", e.dur("CB_HEARTBEAT", 30*time.Second), "heartbeat interval (env CB_HEARTBEAT)")
-	fs.DurationVar(&a.Handshake, "handshake-retry", e.dur("CB_HANDSHAKE_RETRY", 10*time.Second), "how often a hello is repeated until answered (env CB_HANDSHAKE_RETRY)")
-	fs.DurationVar(&a.Silence, "silence-limit", e.dur("CB_SILENCE_LIMIT", 0), "no answer from the hub for this long means a new handshake; 0 means 3 x heartbeat (env CB_SILENCE_LIMIT)")
-	fs.DurationVar(&a.ReorderWindow, "reorder-window", e.dur("CB_REORDER_WINDOW", 2*time.Second), "how long a command waits for an earlier one that has not arrived before that one is reported lost (env CB_REORDER_WINDOW)")
-	fs.DurationVar(&a.ReceiptTimeout, "receipt-timeout", e.dur("CB_RECEIPT_TIMEOUT", 30*time.Second), "a spooled message is sent again if not confirmed in this time (env CB_RECEIPT_TIMEOUT)")
+	fs.StringVar(&a.Name, "name", e.str("PB_NAME", ""), "this agent's name; must match its identity (env PB_NAME)")
+	fs.StringVar(&a.HubPub, "hub-pub", e.str("PB_HUB_PUB", ""), "path of the hub's public bundle, pinned at enrolment (env PB_HUB_PUB)")
+	fs.StringVar(&a.TmuxSession, "tmux-session", e.str("PB_TMUX_SESSION", "claude"), "tmux session that receives the text (env PB_TMUX_SESSION)")
+	fs.StringVar(&a.StateDir, "state-dir", sd, "directory for the spool, lock and alarm state (env PB_STATE_DIR)")
+	fs.BoolVar(&a.AlarmEnabled, "alarm", e.boolean("PB_ALARM", true), "offer the alarm mode (env PB_ALARM)")
+	fs.DurationVar(&a.AlarmCooldown, "alarm-cooldown", e.dur("PB_ALARM_COOLDOWN", time.Minute), "at most one report per sensor in this time (env PB_ALARM_COOLDOWN)")
+	fs.DurationVar(&a.AlarmPoll, "alarm-poll", e.dur("PB_ALARM_POLL", time.Second), "how often the sensors are read (env PB_ALARM_POLL)")
+	fs.DurationVar(&a.Heartbeat, "heartbeat", e.dur("PB_HEARTBEAT", 30*time.Second), "heartbeat interval (env PB_HEARTBEAT)")
+	fs.DurationVar(&a.Handshake, "handshake-retry", e.dur("PB_HANDSHAKE_RETRY", 10*time.Second), "how often a hello is repeated until answered (env PB_HANDSHAKE_RETRY)")
+	fs.DurationVar(&a.Silence, "silence-limit", e.dur("PB_SILENCE_LIMIT", 0), "no answer from the hub for this long means a new handshake; 0 means 3 x heartbeat (env PB_SILENCE_LIMIT)")
+	fs.DurationVar(&a.ReorderWindow, "reorder-window", e.dur("PB_REORDER_WINDOW", 2*time.Second), "how long a command waits for an earlier one that has not arrived before that one is reported lost (env PB_REORDER_WINDOW)")
+	fs.DurationVar(&a.ReceiptTimeout, "receipt-timeout", e.dur("PB_RECEIPT_TIMEOUT", 30*time.Second), "a spooled message is sent again if not confirmed in this time (env PB_RECEIPT_TIMEOUT)")
 	if err := fs.Parse(args); err != nil {
 		return nil, fmt.Errorf("agent: %w", err)
 	}
 	a.validate(e, !emulator(e))
 	if !identity.ValidName(a.Name) {
-		e.err = append(e.err, "name: set CB_NAME or -name (lower-case letters, digits, - and _)")
+		e.err = append(e.err, "name: set PB_NAME or -name (lower-case letters, digits, - and _)")
 	}
 	if a.HubPub == "" {
-		e.err = append(e.err, "hub-pub: set CB_HUB_PUB or -hub-pub")
+		e.err = append(e.err, "hub-pub: set PB_HUB_PUB or -hub-pub")
 	}
 	a.SpoolDir = filepath.Join(a.StateDir, "spool")
 	a.LockFile = filepath.Join(a.StateDir, "locked")
 	a.AlarmState = filepath.Join(a.StateDir, "alarm-armed")
 	a.AlarmCodeState = filepath.Join(a.StateDir, "alarm-code-state")
-	if f := getenv("CB_ALARM_SECRET_FILE"); f != "" {
+	if f := getenv("PB_ALARM_SECRET_FILE"); f != "" {
 		b32, err := readSecretFile(f, a.AllowGroupRead)
 		if err != nil {
-			e.err = append(e.err, "CB_ALARM_SECRET_FILE: "+err.Error())
+			e.err = append(e.err, "PB_ALARM_SECRET_FILE: "+err.Error())
 		} else if secret, err := decodeSecret(b32); err != nil {
-			e.err = append(e.err, "CB_ALARM_SECRET_FILE: "+err.Error())
+			e.err = append(e.err, "PB_ALARM_SECRET_FILE: "+err.Error())
 		} else {
 			a.AlarmSecret = secret
 		}

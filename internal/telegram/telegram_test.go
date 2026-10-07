@@ -171,3 +171,130 @@ func TestFake(t *testing.T) {
 		t.Fatalf("%v", s)
 	}
 }
+
+func TestSetCommandsPublishesTheMenu(t *testing.T) {
+	var method string
+	var body map[string]any
+	c, _ := server(t, func(m string, b map[string]any, w http.ResponseWriter) {
+		method, body = m, b
+		reply(w, 200, map[string]any{"ok": true, "result": true})
+	})
+	if err := c.SetCommands(context.Background(), []Command{{"status", "Agents"}, {"help", "List of commands"}}); err != nil {
+		t.Fatal(err)
+	}
+	cmds, _ := body["commands"].([]any)
+	if method != "setMyCommands" || len(cmds) != 2 {
+		t.Fatalf("%s %v", method, body)
+	}
+	first := cmds[0].(map[string]any)
+	if first["command"] != "status" || first["description"] != "Agents" {
+		t.Fatalf("%v", first)
+	}
+}
+
+func TestReactMarksOneMessageWithOneEmoji(t *testing.T) {
+	var method string
+	var body map[string]any
+	c, _ := server(t, func(m string, b map[string]any, w http.ResponseWriter) {
+		method, body = m, b
+		reply(w, 200, map[string]any{"ok": true, "result": true})
+	})
+	if err := c.React(context.Background(), 5, 77, "👀"); err != nil {
+		t.Fatal(err)
+	}
+	reaction, _ := body["reaction"].([]any)
+	if method != "setMessageReaction" || body["chat_id"] != float64(5) || body["message_id"] != float64(77) || len(reaction) != 1 {
+		t.Fatalf("%s %v", method, body)
+	}
+	if r := reaction[0].(map[string]any); r["type"] != "emoji" || r["emoji"] != "👀" {
+		t.Fatalf("%v", r)
+	}
+}
+
+func TestARefusedReactionIsReportedWithTelegramsReason(t *testing.T) {
+	c, _ := server(t, func(m string, b map[string]any, w http.ResponseWriter) {
+		reply(w, 400, map[string]any{"ok": false, "description": "Bad Request: REACTION_INVALID"})
+	})
+	err := c.React(context.Background(), 5, 77, "🫥")
+	if err == nil || !strings.Contains(err.Error(), "REACTION_INVALID") || strings.Contains(err.Error(), token) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestGetUpdatesReadsRepliesAndButtonTaps(t *testing.T) {
+	c, _ := server(t, func(m string, body map[string]any, w http.ResponseWriter) {
+		allowed, _ := body["allowed_updates"].([]any)
+		if len(allowed) != 2 || allowed[0] != "message" || allowed[1] != "callback_query" {
+			t.Errorf("allowed_updates = %v", allowed)
+		}
+		reply(w, 200, map[string]any{"ok": true, "result": []any{
+			map[string]any{"update_id": 10, "message": map[string]any{
+				"message_id": 50, "date": 1800000000, "text": "yes", "from": map[string]any{"id": 7}, "chat": map[string]any{"id": 7},
+				"reply_to_message": map[string]any{"message_id": 44},
+			}},
+			map[string]any{"update_id": 11, "callback_query": map[string]any{
+				"id": "cb-1", "data": "agent:nas", "from": map[string]any{"id": 7},
+				"message": map[string]any{"message_id": 45, "chat": map[string]any{"id": 7}},
+			}},
+			map[string]any{"update_id": 12, "callback_query": map[string]any{"id": "cb-2", "data": "agent:nas", "from": map[string]any{"id": 7}}},
+		}})
+	})
+	ups, err := c.GetUpdates(context.Background(), 0, time.Second)
+	if err != nil || len(ups) != 3 {
+		t.Fatalf("%v %v", ups, err)
+	}
+	if u := ups[0]; u.Text != "yes" || u.ReplyToID != 44 || u.MessageID != 50 || u.ChatID != 7 || u.UserID != 7 || u.CallbackID != "" {
+		t.Fatalf("%+v", u)
+	}
+	if u := ups[1]; u.CallbackID != "cb-1" || u.CallbackData != "agent:nas" || u.UserID != 7 || u.ChatID != 7 || u.MessageID != 45 || u.Text != "" {
+		t.Fatalf("%+v", u)
+	}
+	if u := ups[2]; u.CallbackID != "cb-2" || u.ChatID != 0 {
+		t.Fatalf("a tap whose message Telegram no longer shows must carry no chat: %+v", u)
+	}
+}
+
+func TestSendMessageReturnsIdsAndPutsButtonsUnderTheLastPartOnly(t *testing.T) {
+	var markups []any
+	next := 100
+	c, _ := server(t, func(m string, body map[string]any, w http.ResponseWriter) {
+		markups = append(markups, body["reply_markup"])
+		next++
+		reply(w, 200, map[string]any{"ok": true, "result": map[string]any{"message_id": next}})
+	})
+	long := strings.Repeat("line of text\n", 1000)
+	ids, err := c.SendMessage(context.Background(), 5, Message{Text: long, Buttons: [][]Button{{{"laptop", "agent:laptop"}}, {{"● nas", "agent:nas"}}}})
+	if err != nil || len(ids) < 4 || len(ids) != len(markups) {
+		t.Fatalf("%v %v", ids, err)
+	}
+	for i, m := range markups[:len(markups)-1] {
+		if m != nil {
+			t.Fatalf("part %d carries the buttons", i)
+		}
+	}
+	rows := markups[len(markups)-1].(map[string]any)["inline_keyboard"].([]any)
+	first := rows[0].([]any)[0].(map[string]any)
+	if len(rows) != 2 || first["text"] != "laptop" || first["callback_data"] != "agent:laptop" {
+		t.Fatalf("%v", rows)
+	}
+	for i := 1; i < len(ids); i++ {
+		if ids[i] <= ids[i-1] {
+			t.Fatalf("ids: %v", ids)
+		}
+	}
+}
+
+func TestAnswerCallbackNamesTheTap(t *testing.T) {
+	var method string
+	var body map[string]any
+	c, _ := server(t, func(m string, b map[string]any, w http.ResponseWriter) {
+		method, body = m, b
+		reply(w, 200, map[string]any{"ok": true, "result": true})
+	})
+	if err := c.AnswerCallback(context.Background(), "cb-1", "Active agent: nas"); err != nil {
+		t.Fatal(err)
+	}
+	if method != "answerCallbackQuery" || body["callback_query_id"] != "cb-1" || body["text"] != "Active agent: nas" {
+		t.Fatalf("%s %v", method, body)
+	}
+}

@@ -42,7 +42,7 @@
    its own.
 5. Time is used only to expire commands and to window handshakes; replay protection uses counters and nonces.
 6. Private keys and secrets live in files that must be mode 0600; the programs refuse to read them otherwise
-   (`CB_ALLOW_GROUP_READ=true` also accepts 0640, for a Kubernetes secret volume with `fsGroup`). Secrets are never
+   (`PB_ALLOW_GROUP_READ=true` also accepts 0640, for a Kubernetes secret volume with `fsGroup`). Secrets are never
    accepted as command-line flags. The agent's state directory is 0700.
 9. Locks fail closed. A lock file that exists, or whose state cannot be checked, means locked; a lockdown that cannot be
    written to disk still holds in memory and the hub is told so. The alarm's state file is written before the alarm
@@ -50,6 +50,9 @@
 10. A command's lifetime starts when the user typed it (the chat's message date), not when the hub got round to it. A
     backlog from a chat outage is not acted on, except `/lockdown`.
 11. A used one-time code stays used across a restart of the agent, and so does a lockout.
+12. With several agents the hub never guesses where a command goes. Until the user chooses an agent (or names one with
+    `@name`, or answers one of its messages) nothing is sent, and a restart of the hub forgets the choice. A tap on an agent
+    button counts only from the configured chat and user.
 7. Text is typed into tmux literally after `--`, limited to 8 KiB, with control characters refused; keys come from an
    allow-list.
 8. Logs record event names, ids and sizes, never content.

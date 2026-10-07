@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"claudebridge/internal/identity"
-	"claudebridge/internal/ratchet"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/ratchet"
 )
 
 var t0 = time.Unix(1_800_000_000, 0)

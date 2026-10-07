@@ -23,9 +23,9 @@ hub   -> agent ack    { v, kind, from, to, eph(32), kem(1088), nonce(16), ts, re
   two minutes of its clock. The hub also refuses a hello whose nonce it has seen (a bounded memory that only
   authenticated hellos can fill) and limits how often one agent may start a handshake.
 * Session key = HKDF-SHA256(ikm = DH(eI,eR) || DH(eI,sR) || DH(sI,eR) || mlkem_secret, salt = SHA-256(hello || ack signed
-  bytes), info = `claudebridge session v1`). The three Diffie-Hellman results bind both ephemeral and both static keys; the
+  bytes), info = `petrvs-bridge session v1`). The three Diffie-Hellman results bind both ephemeral and both static keys; the
   ML-KEM secret protects against a later quantum computer; the transcript in the salt binds everything that was signed.
-* Session id = the first 8 bytes of SHA-256(`claudebridge session id v1` || transcript).
+* Session id = the first 8 bytes of SHA-256(`petrvs-bridge session id v1` || transcript).
 
 The responder's ephemeral key is also its first ratchet key. The hub cannot send until it has received the agent's first
 message (`ready`), as in Signal's initial message flow.
@@ -35,12 +35,12 @@ A new handshake replaces a session only after the new session has carried a vali
 
 ## Ratchet
 
-* DH ratchet: X25519. Root step: HKDF-SHA256(salt = root key, ikm = DH, info = `claudebridge ratchet root v1`) giving a
+* DH ratchet: X25519. Root step: HKDF-SHA256(salt = root key, ikm = DH, info = `petrvs-bridge ratchet root v1`) giving a
   new root key and a chain key.
 * Chain step: HMAC-SHA256 with the chain key over `0x02` for the next chain key and `0x01` for the message key.
-* Message key -> HKDF (`claudebridge message v1`) -> AES-256-GCM key (32 bytes) and nonce (12 bytes). A key is used once.
+* Message key -> HKDF (`petrvs-bridge message v1`) -> AES-256-GCM key (32 bytes) and nonce (12 bytes). A key is used once.
 * Header (plaintext but authenticated): ratchet public key (32), previous chain length (4), message number (4).
-* Associated data = header || caller data (`claudebridge msg v1` || sender || recipient || session id), so a message cannot
+* Associated data = header || caller data (`petrvs-bridge msg v1` || sender || recipient || session id), so a message cannot
   be moved to the other direction, another session or another party.
 * Padding: ISO/IEC 7816-4 to a multiple of 1024 bytes; at most 1 MiB of plaintext.
 * Out-of-order delivery: skipped message keys are stored, at most 50 per gap and 200 in total.
@@ -63,14 +63,17 @@ Parsed strictly (unknown fields rejected). Allowed types depend on the direction
 | Direction | Types |
 |---|---|
 | hub to agent | `text`, `key`, `lockdown`, `alarm`, `ping`, `hback`, `rcpt` |
-| agent to hub | `ready`, `reply`, `notice`, `alert`, `hb`, `dropped`, `pong` |
+| agent to hub | `ready`, `reply`, `notice`, `alert`, `hb`, `dropped`, `pong`, `done` |
 
 * `exp`: a command that reaches the agent after its expiry is dropped and reported. The hub sets 10 minutes for text, 1
   minute for keys and alarm commands, counted from the time the user typed the message (the chat's message date), and
   the agent checks it again at the moment it is about to run the command.
 * `meta.n`: on `text` and `key`, the number of the command in this session, from 1. The agent runs commands in that
-  order, one at a time. A missing number is waited for `CB_REORDER_WINDOW` (2 s by default) and then reported as lost; a
+  order, one at a time. A missing number is waited for `PB_REORDER_WINDOW` (2 s by default) and then reported as lost; a
   command whose number has already been passed is refused and reported; a command without a number is refused.
+* `done`: sent by the agent after it has typed a `text` or pressed a `key`; `body` is the `id` of that command. It is not
+  spooled (if it is lost only a chat mark is lost). The hub uses it to replace the "read" mark on the user's chat message
+  with the "delivered" mark, and only when it comes from the agent that was sent the command.
 * `id`: remembered per session (1024 entries) to drop duplicates.
 * Replies, notices and alerts are queued in a spool on the agent, sent with a stable id, and the file is removed only
   after the hub answers with `rcpt` carrying that id. The hub sends the receipt only after the chat accepted the message,
@@ -90,5 +93,5 @@ without any authenticated message and says so once.
 `lockdown` makes the agent refuse `text` and `key` and refuse to disarm its alarm; it creates a lock file that only a local
 `agent unlock` removes, and answers with a `notice` saying whether the lock reached the disk (if not, it holds until the
 agent restarts). The hub stops relaying at the same time; `/unlock` on the hub does not unlock agents. With
-`CB_LOCK_FILE` the hub's own lockdown survives a restart, and a locked-down hub repeats `lockdown` to every agent whose
+`PB_LOCK_FILE` the hub's own lockdown survives a restart, and a locked-down hub repeats `lockdown` to every agent whose
 new session it accepts.

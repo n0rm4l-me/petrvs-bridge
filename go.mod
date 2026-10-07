@@ -1,4 +1,4 @@
-module claudebridge
+module github.com/n0rm4l-me/petrvs-bridge
 
 go 1.26.6
 

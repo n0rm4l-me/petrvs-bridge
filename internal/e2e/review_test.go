@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"claudebridge/internal/testrig"
-	"claudebridge/internal/wire"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/testrig"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
 )
 
 // quiet options: no heartbeats, so the only traffic on the bus is what a test sends, and nobody is called offline.

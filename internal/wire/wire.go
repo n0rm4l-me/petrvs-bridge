@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"time"
 
-	"claudebridge/internal/ratchet"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/ratchet"
 )
 
 const (
@@ -57,11 +57,12 @@ const (
 	TypeDropped   Type = "dropped" // a command was refused or expired; Body says why
 	TypeAlert     Type = "alert"   // someone touched the machine while the alarm was armed
 	TypePong      Type = "pong"
+	TypeDone      Type = "done" // a text or key command was carried out; Body is the payload id of that command
 )
 
 var (
 	toAgent = map[Type]bool{TypeText: true, TypeKey: true, TypeLockdown: true, TypePing: true, TypeHBAck: true, TypeReceipt: true, TypeAlarm: true}
-	toHub   = map[Type]bool{TypeReady: true, TypeReply: true, TypeNotice: true, TypeHeartbeat: true, TypeDropped: true, TypePong: true, TypeAlert: true}
+	toHub   = map[Type]bool{TypeReady: true, TypeReply: true, TypeNotice: true, TypeHeartbeat: true, TypeDropped: true, TypePong: true, TypeAlert: true, TypeDone: true}
 )
 
 // ErrPayload is returned for a payload that decrypts but is not acceptable.
@@ -111,7 +112,7 @@ func (p *Payload) Validate(toHubDirection bool) error {
 // AD is the associated data bound to every message: direction and session.
 func AD(from, to string, sid [8]byte) []byte {
 	var b bytes.Buffer
-	b.WriteString("claudebridge msg v1\x00")
+	b.WriteString("petrvs-bridge msg v1\x00")
 	b.WriteString(from)
 	b.WriteByte(0)
 	b.WriteString(to)
@@ -176,8 +177,8 @@ func Open(r *ratchet.Ratchet, from, to string, sid [8]byte, data []byte, toHubDi
 // Names builds the topic and subscription names for a deployment.
 type Names struct{ Prefix string }
 
-// DefaultNames uses the prefix "cb".
-func DefaultNames() Names { return Names{Prefix: "cb"} }
+// DefaultNames uses the prefix "pb".
+func DefaultNames() Names { return Names{Prefix: "pb"} }
 
 // ToHub is the topic every agent publishes to.
 func (n Names) ToHub() string { return n.Prefix + "-to-hub" }

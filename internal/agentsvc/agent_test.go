@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"claudebridge/internal/identity"
-	"claudebridge/internal/transport"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/transport"
 )
 
 type noExec struct{}
@@ -41,7 +41,7 @@ func TestDefaultsAreApplied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.cfg.HeartbeatEvery == 0 || a.cfg.SilenceLimit != 3*a.cfg.HeartbeatEvery || a.cfg.Names.Prefix != "cb" || a.cfg.ReceiptTimeout == 0 {
+	if a.cfg.HeartbeatEvery == 0 || a.cfg.SilenceLimit != 3*a.cfg.HeartbeatEvery || a.cfg.Names.Prefix != "pb" || a.cfg.ReceiptTimeout == 0 {
 		t.Fatalf("%+v", a.cfg)
 	}
 	if a.Connected() || a.Locked() {

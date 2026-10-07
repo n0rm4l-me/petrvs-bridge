@@ -4,7 +4,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 
-	"claudebridge/internal/transport"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/transport"
 )
 
 type transportPublished = transport.Published

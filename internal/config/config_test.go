@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"claudebridge/internal/approval"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/approval"
 )
 
 func envOf(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
 func hubEnv() map[string]string {
-	return map[string]string{"CB_PROJECT": "p", "CB_IDENTITY": "/x/hub.identity.json", "CB_AGENTS_DIR": "/x/agents", "CB_CHAT_ID": "4242", "TELEGRAM_BOT_TOKEN": "1:secret"}
+	return map[string]string{"PB_PROJECT": "p", "PB_IDENTITY": "/x/hub.identity.json", "PB_AGENTS_DIR": "/x/agents", "PB_CHAT_ID": "4242", "TELEGRAM_BOT_TOKEN": "1:secret"}
 }
 
 func TestHubDefaults(t *testing.T) {
@@ -21,7 +21,7 @@ func TestHubDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.Prefix != "cb" || h.UserID != 4242 || h.OfflineAfter != 3*time.Minute || h.TextTTL != 10*time.Minute || h.KeyTTL != time.Minute ||
+	if h.Prefix != "pb" || h.UserID != 4242 || h.OfflineAfter != 3*time.Minute || h.TextTTL != 10*time.Minute || h.KeyTTL != time.Minute ||
 		h.PollTimeout != 25*time.Second || h.LogLevel != "info" || h.CreateResources || h.Token != "1:secret" {
 		t.Fatalf("%+v", h)
 	}
@@ -29,7 +29,7 @@ func TestHubDefaults(t *testing.T) {
 
 func TestHubFlagsOverrideTheEnvironment(t *testing.T) {
 	e := hubEnv()
-	e["CB_PREFIX"] = "fromenv"
+	e["PB_PREFIX"] = "fromenv"
 	h, err := ParseHub([]string{"-prefix", "fromflag", "-user-id", "7", "-text-ttl", "5m"}, envOf(e))
 	if err != nil || h.Prefix != "fromflag" || h.UserID != 7 || h.TextTTL != 5*time.Minute {
 		t.Fatalf("%v %+v", err, h)
@@ -65,7 +65,7 @@ func TestTokenFromAFileNeedsPrivatePermissions(t *testing.T) {
 	os.WriteFile(f, []byte("9:fromfile\n"), 0o644)
 	e := hubEnv()
 	delete(e, "TELEGRAM_BOT_TOKEN")
-	e["CB_TELEGRAM_TOKEN_FILE"] = f
+	e["PB_TELEGRAM_TOKEN_FILE"] = f
 	if _, err := ParseHub(nil, envOf(e)); err == nil || !strings.Contains(err.Error(), "readable by other users") {
 		t.Fatalf("a world-readable token file was accepted: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestTokenFromAFileNeedsPrivatePermissions(t *testing.T) {
 
 func TestTheEmulatorMakesTheProjectOptional(t *testing.T) {
 	e := hubEnv()
-	delete(e, "CB_PROJECT")
+	delete(e, "PB_PROJECT")
 	if _, err := ParseHub(nil, envOf(e)); err == nil {
 		t.Fatal("no project and no emulator was accepted")
 	}
@@ -90,17 +90,17 @@ func TestTheEmulatorMakesTheProjectOptional(t *testing.T) {
 
 func TestBadValuesAreRejectedWithTheirNames(t *testing.T) {
 	e := hubEnv()
-	e["CB_OFFLINE_AFTER"] = "soon"
-	e["CB_KEY_TTL"] = "-5s"
-	e["CB_CHAT_ID"] = "abc"
-	e["CB_CREATE_RESOURCES"] = "maybe"
-	e["CB_LOG_LEVEL"] = "loud"
-	e["CB_PREFIX"] = "Bad Prefix"
+	e["PB_OFFLINE_AFTER"] = "soon"
+	e["PB_KEY_TTL"] = "-5s"
+	e["PB_CHAT_ID"] = "abc"
+	e["PB_CREATE_RESOURCES"] = "maybe"
+	e["PB_LOG_LEVEL"] = "loud"
+	e["PB_PREFIX"] = "Bad Prefix"
 	_, err := ParseHub(nil, envOf(e))
 	if err == nil {
 		t.Fatal("accepted")
 	}
-	for _, want := range []string{"CB_OFFLINE_AFTER", "CB_KEY_TTL", "CB_CHAT_ID", "CB_CREATE_RESOURCES", "log-level", "prefix"} {
+	for _, want := range []string{"PB_OFFLINE_AFTER", "PB_KEY_TTL", "PB_CHAT_ID", "PB_CREATE_RESOURCES", "log-level", "prefix"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in:\n%v", want, err)
 		}
@@ -108,7 +108,7 @@ func TestBadValuesAreRejectedWithTheirNames(t *testing.T) {
 }
 
 func agentEnv(t *testing.T) map[string]string {
-	return map[string]string{"CB_PROJECT": "p", "CB_IDENTITY": "/x/laptop.identity.json", "CB_NAME": "laptop", "CB_HUB_PUB": "/x/hub.pub.json", "CB_STATE_DIR": t.TempDir()}
+	return map[string]string{"PB_PROJECT": "p", "PB_IDENTITY": "/x/laptop.identity.json", "PB_NAME": "laptop", "PB_HUB_PUB": "/x/hub.pub.json", "PB_STATE_DIR": t.TempDir()}
 }
 
 func TestAgentDefaults(t *testing.T) {
@@ -127,10 +127,10 @@ func TestAgentDefaults(t *testing.T) {
 
 func TestAgentStateDirFallsBackToXDG(t *testing.T) {
 	e := agentEnv(t)
-	delete(e, "CB_STATE_DIR")
+	delete(e, "PB_STATE_DIR")
 	e["XDG_STATE_HOME"] = "/xdg/state"
 	a, err := ParseAgent(nil, envOf(e))
-	if err != nil || a.StateDir != "/xdg/state/claude-bridge" {
+	if err != nil || a.StateDir != "/xdg/state/petrvs-bridge" {
 		t.Fatalf("%v %q", err, a.StateDir)
 	}
 }
@@ -138,7 +138,7 @@ func TestAgentStateDirFallsBackToXDG(t *testing.T) {
 func TestAgentNameIsValidated(t *testing.T) {
 	for _, bad := range []string{"", "Laptop", "a b", "../x"} {
 		e := agentEnv(t)
-		e["CB_NAME"] = bad
+		e["PB_NAME"] = bad
 		if _, err := ParseAgent(nil, envOf(e)); err == nil {
 			t.Errorf("name %q accepted", bad)
 		}
@@ -150,7 +150,7 @@ func TestAlarmSecretFile(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "alarm-secret")
 	os.WriteFile(f, []byte(b32+"\n"), 0o600)
 	e := agentEnv(t)
-	e["CB_ALARM_SECRET_FILE"] = f
+	e["PB_ALARM_SECRET_FILE"] = f
 	a, err := ParseAgent(nil, envOf(e))
 	if err != nil || string(a.AlarmSecret) != string(secret) {
 		t.Fatalf("%v", err)
@@ -168,7 +168,7 @@ func TestAlarmSecretFile(t *testing.T) {
 
 func TestAgentAlarmCanBeSwitchedOff(t *testing.T) {
 	e := agentEnv(t)
-	e["CB_ALARM"] = "off"
+	e["PB_ALARM"] = "off"
 	a, err := ParseAgent(nil, envOf(e))
 	if err != nil || a.AlarmEnabled {
 		t.Fatalf("%v %+v", err, a)
@@ -191,14 +191,14 @@ func TestNewHubAndAgentSettingsHaveSafeDefaults(t *testing.T) {
 		t.Fatalf("%+v", a)
 	}
 	e := hubEnv()
-	e["CB_LOCK_FILE"] = "/var/lib/bridge/lock"
-	e["CB_ALLOW_GROUP_READ"] = "true"
+	e["PB_LOCK_FILE"] = "/var/lib/bridge/lock"
+	e["PB_ALLOW_GROUP_READ"] = "true"
 	h, err = ParseHub(nil, envOf(e))
 	if err != nil || h.LockFile != "/var/lib/bridge/lock" || !h.AllowGroupRead {
 		t.Fatalf("%v %+v", err, h)
 	}
 	ae := agentEnv(t)
-	ae["CB_REORDER_WINDOW"] = "5s"
+	ae["PB_REORDER_WINDOW"] = "5s"
 	if a, err = ParseAgent(nil, envOf(ae)); err != nil || a.ReorderWindow != 5*time.Second {
 		t.Fatalf("%v %+v", err, a)
 	}
@@ -218,7 +218,7 @@ func TestBotAPIAddressMustNotSendTheTokenInTheClear(t *testing.T) {
 		"https://":                    false,
 	} {
 		e := hubEnv()
-		e["CB_TELEGRAM_API_BASE"] = base
+		e["PB_TELEGRAM_API_BASE"] = base
 		_, err := ParseHub(nil, envOf(e))
 		if (err == nil) != ok {
 			t.Errorf("%s: accepted=%v, want %v (%v)", base, err == nil, ok, err)
@@ -232,16 +232,78 @@ func TestGroupReadableSecretsNeedTheExplicitSetting(t *testing.T) {
 	os.Chmod(f, 0o640)
 	e := hubEnv()
 	delete(e, "TELEGRAM_BOT_TOKEN")
-	e["CB_TELEGRAM_TOKEN_FILE"] = f
+	e["PB_TELEGRAM_TOKEN_FILE"] = f
 	if _, err := ParseHub(nil, envOf(e)); err == nil {
-		t.Fatal("a group-readable token file was accepted without CB_ALLOW_GROUP_READ")
+		t.Fatal("a group-readable token file was accepted without PB_ALLOW_GROUP_READ")
 	}
-	e["CB_ALLOW_GROUP_READ"] = "true"
+	e["PB_ALLOW_GROUP_READ"] = "true"
 	if h, err := ParseHub(nil, envOf(e)); err != nil || h.Token != "9:fromfile" {
 		t.Fatalf("%v %+v", err, h)
 	}
 	os.Chmod(f, 0o604)
 	if _, err := ParseHub(nil, envOf(e)); err == nil {
 		t.Fatal("a world-readable token file was accepted")
+	}
+}
+
+func TestReceivedReactionDefaultsToEyesAndCanBeChangedOrSwitchedOff(t *testing.T) {
+	h, err := ParseHub(nil, envOf(hubEnv()))
+	if err != nil || h.ReceivedReaction != "👀" {
+		t.Fatalf("%v %q", err, h.ReceivedReaction)
+	}
+	for in, want := range map[string]string{"👍": "👍", " 🫡 ": "🫡", "off": "", "OFF": "", "👨‍💻": "👨‍💻"} {
+		e := hubEnv()
+		e["PB_RECEIVED_REACTION"] = in
+		h, err := ParseHub(nil, envOf(e))
+		if err != nil || h.ReceivedReaction != want {
+			t.Errorf("%q: %v %q", in, err, h.ReceivedReaction)
+		}
+	}
+	h, err = ParseHub([]string{"-received-reaction", "🔥"}, envOf(hubEnv()))
+	if err != nil || h.ReceivedReaction != "🔥" {
+		t.Fatalf("%v %q", err, h.ReceivedReaction)
+	}
+}
+
+func TestAReactionThatIsNotAnEmojiIsRefused(t *testing.T) {
+	for _, in := range []string{"on", "yes", "true", "ok", "👍 ok", "👀👀👀👀👀"} {
+		e := hubEnv()
+		e["PB_RECEIVED_REACTION"] = in
+		_, err := ParseHub(nil, envOf(e))
+		if err == nil || !strings.Contains(err.Error(), "PB_RECEIVED_REACTION") {
+			t.Errorf("%q was accepted: %v", in, err)
+		}
+	}
+}
+
+func TestDefaultAgentIsOptionalAndMustBeAValidName(t *testing.T) {
+	h, err := ParseHub(nil, envOf(hubEnv()))
+	if err != nil || h.DefaultAgent != "" {
+		t.Fatalf("%v %q", err, h.DefaultAgent)
+	}
+	e := hubEnv()
+	e["PB_DEFAULT_AGENT"] = "desk"
+	if h, err = ParseHub(nil, envOf(e)); err != nil || h.DefaultAgent != "desk" {
+		t.Fatalf("%v %q", err, h.DefaultAgent)
+	}
+	e["PB_DEFAULT_AGENT"] = "Desk Top"
+	if _, err = ParseHub(nil, envOf(e)); err == nil || !strings.Contains(err.Error(), "default-agent") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestDeliveredReactionDefaultsToAThumbAndIsCheckedLikeTheOther(t *testing.T) {
+	h, err := ParseHub(nil, envOf(hubEnv()))
+	if err != nil || h.DeliveredReaction != "👍" {
+		t.Fatalf("%v %q", err, h.DeliveredReaction)
+	}
+	e := hubEnv()
+	e["PB_DELIVERED_REACTION"] = "off"
+	if h, err = ParseHub(nil, envOf(e)); err != nil || h.DeliveredReaction != "" {
+		t.Fatalf("%v %q", err, h.DeliveredReaction)
+	}
+	e["PB_DELIVERED_REACTION"] = "done"
+	if _, err = ParseHub(nil, envOf(e)); err == nil || !strings.Contains(err.Error(), "PB_DELIVERED_REACTION") {
+		t.Fatalf("%v", err)
 	}
 }

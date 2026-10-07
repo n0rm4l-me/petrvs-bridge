@@ -12,12 +12,12 @@ import (
 	"syscall"
 	"time"
 
-	"claudebridge/internal/config"
-	"claudebridge/internal/hubsvc"
-	"claudebridge/internal/identity"
-	"claudebridge/internal/telegram"
-	"claudebridge/internal/transport"
-	"claudebridge/internal/wire"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/config"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/hubsvc"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/telegram"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/transport"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Getenv)) }
@@ -89,7 +89,7 @@ func run(args []string, getenv func(string) string) int {
 		Identity: id, Agents: agents, Transport: tr, Names: names,
 		Telegram: telegram.NewHTTP(cfg.Token).WithBaseURL(cfg.TelegramBase), ChatID: cfg.ChatID, UserID: cfg.UserID, Log: log,
 		OfflineAfter: cfg.OfflineAfter, TextTTL: cfg.TextTTL, KeyTTL: cfg.KeyTTL, PollTimeout: cfg.PollTimeout, MaxReplyBytes: cfg.MaxReplyBytes,
-		LockFile: cfg.LockFile,
+		LockFile: cfg.LockFile, ReceivedReaction: cfg.ReceivedReaction, DeliveredReaction: cfg.DeliveredReaction, DefaultAgent: cfg.DefaultAgent,
 	})
 	if err != nil {
 		log.Error("invalid hub configuration", "err", err)
