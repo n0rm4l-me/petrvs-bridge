@@ -60,7 +60,7 @@ func TestAPromptIsAnsweredFromTheChatOnlyWhileItIsOnTheScreen(t *testing.T) {
 	// 1. the prompt is there: Yes
 	a.Screen.Set(screentest.Bash(1, "ls /tmp"))
 	first := notifyHook(t, r, a, 1)
-	if !strings.HasPrefix(first.Text, "⏳ Claude needs your permission to use Bash:\n Bash command") {
+	if !strings.HasPrefix(first.Text, "⏳ **Claude needs your permission to use Bash**\n```\n Bash command") {
 		t.Fatalf("%q", first.Text)
 	}
 	r.PressOn(first.ID, button(first, "1. Yes"))
@@ -105,7 +105,7 @@ func TestANumberedListInAnAnswerGetsNoNumberButtons(t *testing.T) {
 	r, a := uiPair(t)
 	a.Screen.Set(screentest.ListInAnswer())
 	r.Say("/screen")
-	snap := r.WaitButtons("laptop's screen:")
+	snap := r.WaitButtons("laptop's screen**")
 	if !strings.Contains(snap.Text, "1. first") {
 		t.Fatalf("%q", snap.Text)
 	}
@@ -123,7 +123,7 @@ func TestANumberedListInAnAnswerGetsNoNumberButtons(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	r.WaitSent("⏳ Claude needs your permission. Answer with /key N")
+	r.WaitSent("⏳ **Claude needs your permission**\n_Answer with /key N")
 	if len(r.SentWithButtons()) != 1 {
 		t.Fatal("the plain notice has buttons")
 	}
@@ -135,7 +135,7 @@ func TestTheScreenCanBeNavigatedFromTheChat(t *testing.T) {
 	r, a := uiPair(t)
 	a.Screen.Set(screentest.Resume())
 	r.Say("/screen")
-	one := r.WaitButtons("laptop's screen:")
+	one := r.WaitButtons("laptop's screen**")
 	if !strings.Contains(one.Text, "Resume Session") || !strings.Contains(one.Text, "fix the build") {
 		t.Fatalf("%q", one.Text)
 	}
@@ -160,7 +160,7 @@ func TestTheScreenHidesSecretsAndShowsAPromptAsAPrompt(t *testing.T) {
 	r, a := uiPair(t)
 	a.Screen.Set(screentest.Lines("$ export API_KEY=k-12345-secret", "$ curl -H 'Authorization: Bearer abc123def' x", "done"))
 	r.Say("/screen")
-	r.WaitSent("laptop's screen:")
+	r.WaitSent("laptop's screen**")
 	for _, leak := range []string{"k-12345-secret", "abc123def"} {
 		if r.Sent(leak) {
 			t.Errorf("the screen shows %q: %q", leak, r.SentTexts())
@@ -273,7 +273,7 @@ func TestEnterOnAnOldScreenDoesNotApproveAPromptThatCameLater(t *testing.T) {
 	r, a := uiPair(t)
 	a.Screen.Set(screentest.Resume())
 	r.Say("/screen")
-	old := r.WaitButtons("laptop's screen:")
+	old := r.WaitButtons("laptop's screen**")
 
 	a.Screen.Set(screentest.Bash(1, "rm -rf /tmp/x"))
 	r.PressOn(old.ID, button(old, "⏎"))

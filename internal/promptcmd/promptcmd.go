@@ -50,20 +50,50 @@ type Notice struct {
 }
 
 // ForPrompt is the notice for a prompt on the screen. message is what Claude Code said ("Claude needs your permission").
+// The notice is Markdown: the headline in bold, the dialog as it is drawn in a code block, the hint in italics.
 func ForPrompt(message string, p screen.Prompt) Notice {
-	body, hint := "⏳ "+headline(message)+":\n"+p.Text, answerHint
+	body, hint := "⏳ **"+headline(message)+"**\n"+code(p.Text), answerHint
 	if p.Redacted {
-		body += "\n" + hiddenNote
+		body += "\n_" + hiddenNote + "_"
 	}
 	if p.Shortened {
 		body, hint = body+"\n"+tooLong, longHint
 	}
-	return Notice{Body: body + "\n\n" + hint, Buttons: Buttons(p)}
+	return Notice{Body: body + "\n\n_" + hint + "_", Buttons: Buttons(p)}
 }
 
 // Plain is the notice when no prompt could be read from the screen: nothing but what Claude Code said.
 func Plain(message string) Notice {
-	return Notice{Body: "⏳ " + headline(message) + ". " + plainHint}
+	return Notice{Body: "⏳ **" + headline(message) + "**\n_" + plainHint + "_"}
+}
+
+// code puts text in a Markdown code block, with a fence longer than any run of backticks inside it.
+func code(text string) string {
+	n := 3
+	for run, i := 0, 0; i <= len(text); i++ {
+		if i < len(text) && text[i] == '`' {
+			run++
+			continue
+		}
+		n = max(n, run+1)
+		run = 0
+	}
+	fence := strings.Repeat("`", n)
+	return fence + "\n" + text + "\n" + fence
+}
+
+// ruleLine is a line that is only a horizontal rule: Claude Code draws them as wide as the window, and on a phone that is a
+// line to scroll along for nothing.
+var ruleLine = regexp.MustCompile(`^[ ]*[─━═╌╍┄┅-]{20,}[ ]*$`)
+
+func squashRules(text string) string {
+	ls := strings.Split(text, "\n")
+	for i, l := range ls {
+		if ruleLine.MatchString(l) {
+			ls[i] = strings.Repeat("─", 30)
+		}
+	}
+	return strings.Join(ls, "\n")
 }
 
 // Buttons gives one button per choice of the prompt and one for Escape, all bound to the prompt by its hash; at most
@@ -91,7 +121,7 @@ func ForScreen(agent, scr string) Notice {
 	if text == "" {
 		text = "(the screen is empty)"
 	}
-	return Notice{Body: "📺 " + agent + "'s screen:\n" + tail(text, maxScreenChars), Buttons: NavButtons()}
+	return Notice{Body: "📺 **" + agent + "'s screen**\n" + code(tail(squashRules(text), maxScreenChars)), Buttons: NavButtons()}
 }
 
 // NavButtons move in a list or dialog that the screen shows.
@@ -111,6 +141,7 @@ func Snapshot(agent, scr string) Notice {
 func headline(message string) string {
 	m := strings.Join(strings.Fields(message), " ")
 	m = strings.TrimRight(screen.Redact(m), ".:!? ")
+	m = strings.NewReplacer("*", "", "`", "").Replace(m) // the headline is set in bold: a mark inside it would close it early
 	return screen.Cut(m, maxMessage)
 }
 

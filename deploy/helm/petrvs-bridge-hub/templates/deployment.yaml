@@ -66,6 +66,7 @@ spec:
             - {name: PB_LOG_LEVEL, value: {{ .Values.hub.logLevel | quote }}}
             - {name: PB_RECEIVED_REACTION, value: {{ .Values.hub.receivedReaction | quote }}}
             - {name: PB_DELIVERED_REACTION, value: {{ .Values.hub.deliveredReaction | quote }}}
+            - {name: PB_FAILED_REACTION, value: {{ .Values.hub.failedReaction | quote }}}
             {{- with .Values.hub.defaultAgent }}
             - {name: PB_DEFAULT_AGENT, value: {{ . | quote }}}
             {{- end }}

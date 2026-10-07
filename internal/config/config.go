@@ -49,10 +49,15 @@ type Hub struct {
 	// DefaultAgent is where plain text goes until the user picks an agent. Empty means: ask first (with one agent, that
 	// agent is used).
 	DefaultAgent string
-	// ReceivedReaction is the emoji put on each message of the user once the hub has read it; empty means no mark.
+	// ReceivedReaction is the emoji put on each message of the user once the hub has read it, before any agent has seen it;
+	// empty means no mark, which is the default: the mark that matters is the agent's.
 	ReceivedReaction string
-	// DeliveredReaction replaces it when the agent has typed the command into the session; empty means it stays.
+	// DeliveredReaction is put on the message when the agent has got the command and typed it into the session; empty means
+	// no mark from the agent.
 	DeliveredReaction string
+	// FailedReaction is put on the message when the command did not get through (the hub could not send it, or the agent
+	// could not carry it out); empty means no mark.
+	FailedReaction string
 	// MaxFileBytes bounds a file in either direction; 0 was replaced by the default (20 MiB).
 	MaxFileBytes int64
 }
@@ -324,14 +329,16 @@ func ParseHub(args []string, getenv func(string) string) (*Hub, error) {
 	fs.Int64Var(&h.MaxFileBytes, "max-file-bytes", e.int64("PB_MAX_FILE_BYTES"), "largest file in either direction; 0 means 20 MiB, at most 50 MiB (env PB_MAX_FILE_BYTES)")
 	fs.StringVar(&h.LockFile, "lock-file", e.str("PB_LOCK_FILE", ""), "file that keeps a lockdown across restarts of the hub; empty means a restart ends it (env PB_LOCK_FILE)")
 	fs.StringVar(&h.DefaultAgent, "default-agent", e.str("PB_DEFAULT_AGENT", ""), "agent that gets plain text until you choose one; empty means the hub asks first when it has several (env PB_DEFAULT_AGENT)")
-	reaction := fs.String("received-reaction", e.str("PB_RECEIVED_REACTION", "👀"), "emoji put on each message of yours once the hub has read it, or off (env PB_RECEIVED_REACTION)")
-	delivered := fs.String("delivered-reaction", e.str("PB_DELIVERED_REACTION", "👍"), "emoji that replaces it once the agent has typed the text into the session, or off (env PB_DELIVERED_REACTION)")
+	reaction := fs.String("received-reaction", e.str("PB_RECEIVED_REACTION", "off"), "emoji put on each message of yours once the hub has read it, before the agent has, or off (env PB_RECEIVED_REACTION)")
+	delivered := fs.String("delivered-reaction", e.str("PB_DELIVERED_REACTION", "👀"), "emoji the agent causes to be put on your message once it has got it and typed it into the session, or off (env PB_DELIVERED_REACTION)")
+	failed := fs.String("failed-reaction", e.str("PB_FAILED_REACTION", "👎"), "emoji put on your message when it did not get through (agent offline, bus refused, agent could not type it), or off (env PB_FAILED_REACTION)")
 	if err := parseFlags(fs, args); err != nil {
 		return nil, err
 	}
 	h.MaxFileBytes = checkFileLimit(e, h.MaxFileBytes)
 	h.ReceivedReaction = checkReaction(e, "PB_RECEIVED_REACTION", *reaction)
 	h.DeliveredReaction = checkReaction(e, "PB_DELIVERED_REACTION", *delivered)
+	h.FailedReaction = checkReaction(e, "PB_FAILED_REACTION", *failed)
 	if h.DefaultAgent != "" && !identity.ValidName(h.DefaultAgent) {
 		e.err = append(e.err, "default-agent: lower-case letters, digits, - and _")
 	}

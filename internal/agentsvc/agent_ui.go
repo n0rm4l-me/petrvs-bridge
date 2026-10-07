@@ -3,6 +3,7 @@ package agentsvc
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -130,6 +131,11 @@ func (a *Agent) checkPrompt(ctx context.Context, p *wire.Payload) error {
 	}
 	pr, ok := screen.ExtractPrompt(scr)
 	if !ok || pr.Hash != want || !answers(pr, p.Body) {
+		// Why, without the screen itself: a keyed hash is not the text, and the counts say whether the pane was too small to
+		// hold the dialog (a prompt that is cut off is not found, or has another hash from one look to the next).
+		a.log.Warn("refused a key for a prompt: it is not the one on the screen",
+			"key", p.Body, "prompt_found", ok, "same_prompt", ok && pr.Hash == want, "answers_it", ok && answers(pr, p.Body),
+			"wanted", want, "on_screen", pr.Hash, "choices", len(pr.Options), "screen_lines", strings.Count(scr, "\n")+1)
 		return &userError{errStalePrompt}
 	}
 	return nil

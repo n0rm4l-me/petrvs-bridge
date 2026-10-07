@@ -162,8 +162,16 @@ func (t *Tmux) Start(ctx context.Context, workdir, command string) error {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.run(ctx, "new-session", "-d", "-s", t.session, "-c", workdir, "cd "+shellQuote(workdir)+" && exec "+command)
+	return t.run(ctx, "new-session", "-d", "-s", t.session, "-x", sessionCols, "-y", sessionRows, "-c", workdir, "cd "+shellQuote(workdir)+" && exec "+command)
 }
+
+// The size of a session that no terminal is attached to. tmux would make it 80x24, and a permission dialog for a command of
+// twenty lines does not fit in that: the capture shows a part of it that moves, the prompt is not recognised or its hash
+// changes between the notice and the tap, and the button is refused as stale.
+const (
+	sessionCols = "200"
+	sessionRows = "60"
+)
 
 // shellQuote wraps s in single quotes for sh.
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }

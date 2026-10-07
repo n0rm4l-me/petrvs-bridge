@@ -63,12 +63,17 @@ type Config struct {
 	// asks first instead of guessing, so that an answer typed after a hub restart cannot end up on the wrong machine.
 	// With a single agent that agent is always the active one.
 	DefaultAgent string
-	// DeliveredReaction replaces the mark when the agent reports that it typed the command into the session. Empty
-	// means the mark stays as it is.
+	// DeliveredReaction is put on the message when the agent reports that it got the command and typed it into the
+	// session: the mark of the machine, not of the hub. It replaces ReceivedReaction if there is one. Empty means no mark
+	// from the agent.
 	DeliveredReaction string
-	// ReceivedReaction is the emoji the hub puts on a message of the authorised user as soon as it has read it, so the
-	// user sees that the hub got it. Empty means no mark.
+	// ReceivedReaction is the emoji the hub puts on a message of the authorised user as soon as it has read it, before
+	// any agent has seen it. Empty means no mark (the default: the mark that matters is the agent's).
 	ReceivedReaction string
+	// FailedReaction is put on the message when the command did not get through: the hub could not send it (the agent is
+	// offline, locked down, the bus refused it) or the agent could not carry it out. It replaces any earlier mark. Empty
+	// means no mark.
+	FailedReaction string
 	// LockFile, if set, keeps a lockdown across restarts of the hub: it exists while the hub is locked down.
 	LockFile string
 }
@@ -172,7 +177,7 @@ func New(cfg Config) (*Hub, error) {
 		cfg.MaxReplyBytes = 20000
 	}
 	h := &Hub{cfg: cfg, log: cfg.Log.With("role", "hub"), guard: handshake.NewGuardPerSender(4096, 128), agents: map[string]*agentState{}, msgAgent: map[int64]string{}, cmdMsg: map[string]sentCommand{}}
-	if _, ok := cfg.Telegram.(telegram.Reactor); ok && (cfg.ReceivedReaction != "" || cfg.DeliveredReaction != "") {
+	if _, ok := cfg.Telegram.(telegram.Reactor); ok && (cfg.ReceivedReaction != "" || cfg.DeliveredReaction != "" || cfg.FailedReaction != "") {
 		h.reactQ = make(chan mark, maxMarksQueued)
 	}
 	if cfg.LockFile != "" {
@@ -344,7 +349,7 @@ func (h *Hub) markReceived(messageID int64) { h.enqueueMark(messageID, h.cfg.Rec
 
 // rememberCommand notes which chat message a relayed command came from.
 func (h *Hub) rememberCommand(agent, commandID string, messageID int64) {
-	if h.reactQ == nil || h.cfg.DeliveredReaction == "" || messageID == 0 {
+	if h.reactQ == nil || (h.cfg.DeliveredReaction == "" && h.cfg.FailedReaction == "") || messageID == 0 {
 		return
 	}
 	h.mu.Lock()
@@ -375,6 +380,23 @@ func (h *Hub) markDelivered(agent, commandID string) {
 	h.mu.Unlock()
 	if ok && c.agent == agent {
 		h.enqueueMark(c.messageID, h.cfg.DeliveredReaction)
+	}
+}
+
+// markFailed marks a message whose command did not get through.
+func (h *Hub) markFailed(messageID int64) { h.enqueueMark(messageID, h.cfg.FailedReaction) }
+
+// markFailedCommand marks the message a command came from, when the agent that got the command says it could not carry
+// it out. A report from another agent, or about an unknown command, changes nothing.
+func (h *Hub) markFailedCommand(agent, commandID string) {
+	h.mu.Lock()
+	c, ok := h.cmdMsg[commandID]
+	if ok && c.agent == agent {
+		delete(h.cmdMsg, commandID)
+	}
+	h.mu.Unlock()
+	if ok && c.agent == agent {
+		h.markFailed(c.messageID)
 	}
 }
 
@@ -893,6 +915,7 @@ func (h *Hub) deliverWith(ctx context.Context, agent string, t wire.Type, body s
 	}
 	if now.Sub(sentAt) > ttl {
 		h.say(ctx, "⚠️ Ignored a message that was already older than its validity ("+ttl.String()+"). Send it again if you still want it.")
+		h.markFailed(msgID)
 		return false
 	}
 	h.mu.Lock()
@@ -908,16 +931,20 @@ func (h *Hub) deliverWith(ctx context.Context, agent string, t wire.Type, body s
 	switch {
 	case locked:
 		h.say(ctx, "Lockdown is on: nothing is sent. /unlock turns the hub's relay back on.")
+		h.markFailed(msgID)
 		return false
 	case s == nil:
 		h.say(ctx, "⚠️ "+agent+" is not connected.")
+		h.markFailed(msgID)
 		return false
 	case reconnecting:
 		h.say(ctx, "⚠️ "+agent+" is reconnecting. Send it again in a moment.")
+		h.markFailed(msgID)
 		return false
 	case silent >= h.cfg.OfflineAfter:
 		// A command that waits for a machine that is away would arrive stale, so say so now instead of queueing it.
 		h.say(ctx, "⚠️ "+agent+" is offline (last heard "+silent.Round(time.Second).String()+" ago). Not sent.")
+		h.markFailed(msgID)
 		return false
 	}
 	p := &wire.Payload{ID: newID(), Type: t, Body: body, TS: now.Unix(), Exp: sentAt.Add(ttl).Unix()}
@@ -954,6 +981,7 @@ func (h *Hub) deliverWith(ctx context.Context, agent string, t wire.Type, body s
 		} else {
 			h.say(ctx, "⚠️ Could not prepare the message.")
 		}
+		h.markFailed(msgID)
 		return false
 	}
 	if command {
@@ -966,6 +994,7 @@ func (h *Hub) deliverWith(ctx context.Context, agent string, t wire.Type, body s
 			h.noteUnsent(s, n) // the number stays taken (the message may be out there); the agent's report of the gap is not news
 		}
 		h.say(ctx, "⚠️ The message bus did not accept the message.")
+		h.markFailed(msgID)
 		return false
 	}
 	h.relayed.Add(1)
@@ -1289,6 +1318,7 @@ func (h *Hub) onMsg(ctx context.Context, m *transport.Message) {
 		h.markDelivered(name, p.Body)
 		h.noteDone(name, p.Body)
 	case wire.TypeDropped:
+		h.markFailedCommand(name, p.Meta[wire.MetaCommand])
 		if !h.wasUnsent(s, p.Meta[wire.MetaSeq]) {
 			h.sayAs(ctx, name, "⚠️ "+h.tag(name)+p.Body)
 		}

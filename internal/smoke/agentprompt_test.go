@@ -78,7 +78,7 @@ func TestPromptNeedsNoMoreThanTheStateDirectoryAndTmux(t *testing.T) {
 		}
 		pr = keyed
 		it := got[0]
-		if it.Type != "notice" || !strings.HasPrefix(it.Body, "⏳ Claude needs your permission to use Bash:\n Bash command\n") || !strings.Contains(it.Body, "│ ls -la /tmp") {
+		if it.Type != "notice" || !strings.HasPrefix(it.Body, "⏳ **Claude needs your permission to use Bash**\n```\n Bash command\n") || !strings.Contains(it.Body, "│ ls -la /tmp") {
 			t.Errorf("%+v", it)
 		}
 		if len(it.Buttons) != 4 || it.Buttons[0].Key != "1" || it.Buttons[3].Key != "Escape" || it.Buttons[0].Prompt != pr.Hash {
@@ -102,7 +102,7 @@ func TestPromptNeedsNoMoreThanTheStateDirectoryAndTmux(t *testing.T) {
 		state := t.TempDir()
 		_, errs, code := runEmpty(t, bin, permission, []string{"PB_STATE_DIR=" + state, "PATH=/usr/bin:/bin"}, "prompt")
 		got := queuedItems(t, filepath.Join(state, "spool"))
-		want := "⏳ Claude needs your permission to use Bash. Answer with /key N (the number of your choice), /enter or /esc."
+		want := "⏳ **Claude needs your permission to use Bash**\n_Answer with /key N (the number of your choice), /enter or /esc._"
 		if code != 0 || len(got) != 1 || got[0].Body != want || len(got[0].Buttons) != 0 {
 			t.Fatalf("exit %d, spooled %+v, stderr %q", code, got, errs)
 		}
@@ -118,7 +118,7 @@ func TestPromptNeedsNoMoreThanTheStateDirectoryAndTmux(t *testing.T) {
 		os.Remove(argsFile) // the earlier cases left what tmux was asked
 		_, errs, code := runEmpty(t, bin, permission, append([]string{"PB_STATE_DIR=" + state}, withTmux...), "prompt")
 		got := queuedItems(t, filepath.Join(state, "spool"))
-		want := "⏳ Claude needs your permission to use Bash. Answer with /key N (the number of your choice), /enter or /esc."
+		want := "⏳ **Claude needs your permission to use Bash**\n_Answer with /key N (the number of your choice), /enter or /esc._"
 		if code != 0 || len(got) != 1 || got[0].Body != want || len(got[0].Buttons) != 0 || !strings.Contains(errs, "prompt key") {
 			t.Fatalf("exit %d, spooled %+v, stderr %q", code, got, errs)
 		}

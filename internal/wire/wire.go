@@ -41,6 +41,7 @@ const (
 	MetaKind     = "kind"   // file: "photo" (shown as a picture) or "document"
 	MetaPrompt   = "prompt" // key: hash of the prompt the key answers; the agent presses it only if that prompt is still shown
 	MetaEcho     = "echo"   // key: "mode" asks the agent to report the permission mode after pressing the key
+	MetaCommand  = "cmd"    // dropped: id of the command that could not be carried out, so that the hub can mark its message
 
 	// MaxChunk is the most file bytes that one part carries. Base64 makes its Body a third longer, still under MaxBody.
 	MaxChunk = 128 << 10

@@ -954,7 +954,7 @@ func (a *Agent) execute(ctx context.Context, p *wire.Payload) {
 		if errors.As(err, &ue) {
 			msg = ue.msg
 		}
-		a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: msg})
+		a.send(ctx, &wire.Payload{Type: wire.TypeDropped, Body: msg, Meta: map[string]string{wire.MetaCommand: p.ID}})
 		return
 	}
 	a.executed.Add(1)

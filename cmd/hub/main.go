@@ -94,7 +94,7 @@ func run(args []string, getenv func(string) string) int {
 		Identity: id, Agents: agents, Transport: tr, Names: names,
 		Telegram: telegram.NewHTTP(cfg.Token).WithBaseURL(cfg.TelegramBase), ChatID: cfg.ChatID, UserID: cfg.UserID, Log: log,
 		OfflineAfter: cfg.OfflineAfter, TextTTL: cfg.TextTTL, KeyTTL: cfg.KeyTTL, PollTimeout: cfg.PollTimeout, MaxReplyBytes: cfg.MaxReplyBytes,
-		LockFile: cfg.LockFile, ReceivedReaction: cfg.ReceivedReaction, DeliveredReaction: cfg.DeliveredReaction, DefaultAgent: cfg.DefaultAgent,
+		LockFile: cfg.LockFile, ReceivedReaction: cfg.ReceivedReaction, DeliveredReaction: cfg.DeliveredReaction, FailedReaction: cfg.FailedReaction, DefaultAgent: cfg.DefaultAgent,
 		MaxFileBytes: cfg.MaxFileBytes,
 	})
 	if err != nil {

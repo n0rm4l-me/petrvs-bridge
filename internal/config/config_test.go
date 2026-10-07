@@ -255,8 +255,8 @@ func TestGroupReadableSecretsNeedTheExplicitSetting(t *testing.T) {
 
 func TestReceivedReactionDefaultsToEyesAndCanBeChangedOrSwitchedOff(t *testing.T) {
 	h, err := ParseHub(nil, envOf(hubEnv()))
-	if err != nil || h.ReceivedReaction != "👀" {
-		t.Fatalf("%v %q", err, h.ReceivedReaction)
+	if err != nil || h.ReceivedReaction != "" || h.DeliveredReaction != "👀" || h.FailedReaction != "👎" {
+		t.Fatalf("%v received=%q delivered=%q failed=%q: the agent's mark is the one that is on by default", err, h.ReceivedReaction, h.DeliveredReaction, h.FailedReaction)
 	}
 	for in, want := range map[string]string{"👍": "👍", " 🫡 ": "🫡", "off": "", "OFF": "", "👨‍💻": "👨‍💻"} {
 		e := hubEnv()
@@ -301,7 +301,7 @@ func TestDefaultAgentIsOptionalAndMustBeAValidName(t *testing.T) {
 
 func TestDeliveredReactionDefaultsToAThumbAndIsCheckedLikeTheOther(t *testing.T) {
 	h, err := ParseHub(nil, envOf(hubEnv()))
-	if err != nil || h.DeliveredReaction != "👍" {
+	if err != nil || h.DeliveredReaction != "👀" {
 		t.Fatalf("%v %q", err, h.DeliveredReaction)
 	}
 	e := hubEnv()

@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/n0rm4l-me/petrvs-bridge/internal/tgfmt"
 )
 
 // MaxMessage is Telegram's limit for one message, with headroom.
@@ -46,6 +48,9 @@ type Button struct{ Text, Data string }
 type Message struct {
 	Text    string
 	Buttons [][]Button
+	// Markdown says that Text is Markdown (bold, code, lists, quotes, tables), shown formatted. Telegram takes HTML, so the
+	// client converts it; if Telegram refuses the result, the part is sent as the plain text it came from.
+	Markdown bool
 }
 
 // Client is what the hub needs from Telegram.
@@ -328,13 +333,31 @@ func (c *HTTP) SendMessage(ctx context.Context, chatID int64, m Message) ([]int6
 	}
 	var ids []int64
 	parts := Chunks(m.Text, MaxMessage)
+	if m.Markdown {
+		parts = tgfmt.Split(m.Text, MaxMessage) // cut so that every part is Markdown of its own, and a code block is not left open
+	}
 	for i, part := range parts {
 		body := map[string]any{"chat_id": chatID, "text": part, "disable_web_page_preview": true}
+		formatted := false
+		if m.Markdown {
+			if html := tgfmt.HTML(part); strings.TrimSpace(html) != "" {
+				body["text"], body["parse_mode"], formatted = html, "HTML", true
+			}
+		}
 		if i == len(parts)-1 && len(m.Buttons) > 0 {
 			body["reply_markup"] = map[string]any{"inline_keyboard": keyboard(m.Buttons)}
 		}
 		for attempt := 0; ; attempt++ {
 			out, err := c.call(ctx, "sendMessage", body, sendTimeout)
+			var ae *APIError
+			if formatted && errors.As(err, &ae) && ae.Code == 400 && strings.Contains(strings.ToLower(ae.Desc), "parse") {
+				// Telegram did not take the formatting (an entity it does not like in some corner case). The words matter more
+				// than the looks: send the part as it was written.
+				formatted = false
+				body["text"] = part
+				delete(body, "parse_mode")
+				continue
+			}
 			var rl ErrRateLimited
 			if errors.As(err, &rl) && attempt < 2 {
 				wait := rl.After
@@ -410,10 +433,11 @@ func (c *HTTP) React(ctx context.Context, chatID, messageID int64, emoji string)
 
 // Sent is a message recorded by Fake. ID is the id the fake gave it (ids are unique and increase).
 type Sent struct {
-	ChatID  int64
-	Text    string
-	ID      int64
-	Buttons [][]Button
+	ChatID   int64
+	Text     string
+	ID       int64
+	Buttons  [][]Button
+	Markdown bool
 }
 
 // Reaction is a reaction recorded by Fake.
@@ -503,7 +527,7 @@ func (f *Fake) SendMessage(_ context.Context, chatID int64, m Message) ([]int64,
 	}
 	f.nextMsg++
 	id := 1000 + f.nextMsg
-	f.sent = append(f.sent, Sent{ChatID: chatID, Text: m.Text, ID: id, Buttons: m.Buttons})
+	f.sent = append(f.sent, Sent{ChatID: chatID, Text: m.Text, ID: id, Buttons: m.Buttons, Markdown: m.Markdown})
 	return []int64{id}, nil
 }
 

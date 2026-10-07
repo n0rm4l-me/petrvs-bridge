@@ -104,7 +104,7 @@ func TestStartRunsTheCommandInTheWorkingDirectoryThroughCd(t *testing.T) {
 	if err := tm.Start(context.Background(), "/home/me/it's here", "claude --continue"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"new-session", "-d", "-s", "claude-dev", "-c", "/home/me/it's here", `cd '/home/me/it'\''s here' && exec claude --continue`}
+	want := []string{"new-session", "-d", "-s", "claude-dev", "-x", "200", "-y", "60", "-c", "/home/me/it's here", `cd '/home/me/it'\''s here' && exec claude --continue`}
 	if len(r.calls) != 1 || !reflect.DeepEqual(r.calls[0], want) {
 		t.Fatalf("calls = %q", r.calls)
 	}

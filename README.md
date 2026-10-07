@@ -171,11 +171,13 @@ else" cannot be sent from the chat while the list is on screen). The same holds 
 a file (the file stays saved). A pane that is scrolled back with the mouse (copy mode) is left first, so text and keys
 reach Claude Code. `/continue` starts Claude Code.
 
-The hub publishes the commands as the bot's menu (what Telegram shows when you type `/`) each time it starts, and marks every
-message of yours with a reaction as soon as it has read it (`PB_RECEIVED_REACTION`, 👀 by default), and replaces it with
-another (`PB_DELIVERED_REACTION`, 👍 by default) when the agent reports that it has typed the text into the session, so you
-can see on the phone that it arrived and that it was delivered. A command the agent refused or dropped keeps 👀, and the hub
-says why in the chat. All of this is a courtesy: a failure is logged and never holds up a command.
+The hub publishes the commands as the bot's menu (what Telegram shows when you type `/`) each time it starts. The mark on your
+message comes from the machine: when the agent has got a command and typed it into the session it reports so, and the hub puts
+👀 on your message (`PB_DELIVERED_REACTION`). The hub itself marks only a failure, with 👎 (`PB_FAILED_REACTION`): when it could
+not send the command (the agent is offline or reconnecting, a lockdown is on, the command was already stale, the bus refused
+it) or when the agent reported that it could not carry it out (a stale prompt, a dialog in the way). Either way it says why in
+the chat. So no mark means the machine has not got it yet. `PB_RECEIVED_REACTION` can still add an early mark when the hub
+has read the message, off by default. All of this is a courtesy: a failure is logged and never holds up a command.
 
 A command older than its time to live is **dropped and reported**, never typed: text lives 10 minutes, keys and alarm
 commands one minute, counted from when you sent the message (so a backlog that Telegram delivers after an outage of the
@@ -244,8 +246,9 @@ unknown flag prints them too, and exits with 2).
 | `PB_MAX_REPLY_BYTES` | `-max-reply-bytes` | `20000` | Longest reply shown in the chat (longer ones are cut, with a note) |
 | `PB_MAX_FILE_BYTES` | `-max-file-bytes` | `20971520` (20 MiB) | Largest file in either direction, at most 50 MiB (Telegram lets a bot download 20 MB) |
 | `PB_DEFAULT_AGENT` | `-default-agent` | unset | Agent that gets plain text until you choose one. Unset with several agents means the hub asks first; with one agent that one is used |
-| `PB_DELIVERED_REACTION` | `-delivered-reaction` | `👍` | Emoji that replaces the first one when the agent has typed the text (or pressed the key) in its session; `off` leaves the first one. Same rules as above |
-| `PB_RECEIVED_REACTION` | `-received-reaction` | `👀` | Emoji the hub puts on each of your messages once it has read it; `off` turns it off. Telegram accepts only a fixed set of reaction emoji (see `ReactionTypeEmoji` in the Bot API documentation, for example 👀 👍 🔥 🎉 🫡 🤝 ⚡); if it refuses yours the hub says so once in its log and stops marking |
+| `PB_DELIVERED_REACTION` | `-delivered-reaction` | `👀` | Emoji put on your message when the agent has got the command and typed the text (or pressed the key) in its session; `off` for no mark. Same rules as below |
+| `PB_FAILED_REACTION` | `-failed-reaction` | `👎` | Emoji put on your message when it did not get through: the hub could not send it, or the agent could not carry it out; it replaces any earlier mark. `off` for none |
+| `PB_RECEIVED_REACTION` | `-received-reaction` | `off` | An early mark the hub puts on each of your messages as soon as it has read it, before the agent has; `off` (the default) for none. Telegram accepts only a fixed set of reaction emoji (see `ReactionTypeEmoji` in the Bot API documentation, for example 👀 👍 🔥 🎉 🫡 🤝 ⚡); if it refuses yours the hub says so once in its log and stops marking |
 | `PB_LOCK_FILE` | `-lock-file` | unset | File that keeps the hub's lockdown across restarts of the process. Unset, a restart forgets a lockdown. In Kubernetes the chart puts it on an `emptyDir`, which is forgotten when the pod is replaced (see Limitations) |
 | `PB_ALLOW_GROUP_READ` | `-allow-group-read` | `false` | Also accept private files that are group-readable (0640), for a Kubernetes secret volume with `fsGroup`. Never world-readable |
 | `PB_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error`. Logs never contain message text or tokens. Both programs write JSON lines; the hub names the fields `severity` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) and `message`, which is what Cloud Logging on GKE reads, and the agent `level` and `msg` |
@@ -362,6 +365,30 @@ The agent also makes a last pass over the spool when it is told to stop (SIGTERM
 out yet are handed to the bus, for up to 3 seconds, so that an answer queued a moment before a service restart does not wait
 for the next start. The files stay until the hub's receipt, as always. This helps when the hub is somewhere else; on one
 machine with the hub it is the PreToolUse hook that covers a shutdown, because the hub stops at the same moment.
+
+**How the chat looks.** What an agent says reaches the chat as Markdown and is shown formatted: the hub converts it to the HTML
+that Telegram takes (`internal/tgfmt`), with bold, italics, strike, inline code, code blocks, lists, quotes and links
+(http and https only). A table, which Telegram cannot show, becomes an aligned block of fixed-width text. Text that only looks
+like Markdown (`snake_case`, `2*3*4`) is left alone. A long text is cut at line breaks so that a code block that a cut falls
+in is closed and opened again, and if Telegram refuses the formatting of a part, that part is sent as plain text with its
+buttons: the words arrive either way. The agent's own notices use it too: a prompt and a screen are code blocks, with the
+rules that Claude Code draws across the window shortened to fit a phone. What the hub says itself (status, errors) is plain text.
+
+[examples/tmux-attach-alert.sh](examples/tmux-attach-alert.sh) tells the chat at once when someone attaches to the tmux session
+that Claude Code runs in (tmux's `client-attached` and `client-session-changed` hooks on that one session): who, from where, in
+which mode. `install` and `uninstall` put the hooks on and take them off; `guard COMMAND...` installs them and then becomes the
+command, so putting it in front of `PB_CLAUDE_COMMAND` brings the hooks back after every restart of the session. With
+`PB_ATTACH_KICK=1` it also disconnects the client (off by default, since it disconnects you too; attaching is allowed for a
+while by writing an end time to `$PB_STATE_DIR/attach-allow-until`). This is an alarm, not a lock: tmux has no access control
+beyond the permissions of its socket, so a process of the same user can still attach, type and read the screen, can take the
+hooks off before it attaches, and `send-keys` or `capture-pane` from a script has no client to notice. A separate account for the
+session is the protection that holds.
+
+**The size of the session.** A session that no terminal is attached to is 80x24 by default, and a permission dialog for a command
+of twenty lines does not fit in that: the capture shows a part of it that moves, the prompt is not recognised or its hash changes
+between the notice and the tap, and the button is refused as stale ("that prompt is no longer on the screen"). The agent
+creates the session 200x60 and logs why it refused a key (whether a prompt was found, whether it was the same one, and the number
+of lines on the screen). A session started by hand needs `tmux new-session -d -x 200 -y 60`, or `tmux resize-window -x 200 -y 60`.
 
 [examples/claude-notify-hook.sh](examples/claude-notify-hook.sh) is the `Notification` hook. It runs `agent prompt`, which
 reads the prompt from the screen of the tmux pane that Claude Code runs in (`TMUX_PANE`, which Claude Code inherits from

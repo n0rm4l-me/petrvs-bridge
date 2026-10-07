@@ -141,7 +141,7 @@ func TestATapWhileTheHubIsLockedDownSendsNothing(t *testing.T) {
 	r.Eventually("told it is locked", func() bool { return answered(r, "Locked") })
 	r.PressOn(msg.ID, "s:laptop")
 	r.Eventually("told again", func() bool { return strings.Count(strings.Join(r.TG.Answered(), "\n"), "Locked") == 2 })
-	r.Never("a key pressed or a screen sent while locked down", 300*time.Millisecond, func() bool { return len(a.Exec.Keys()) > 0 || r.Sent("screen:") })
+	r.Never("a key pressed or a screen sent while locked down", 300*time.Millisecond, func() bool { return len(a.Exec.Keys()) > 0 || r.Sent("screen**") })
 	if len(r.TG.Cleared()) != 0 {
 		t.Fatal("the buttons were taken off although nothing was sent")
 	}
@@ -250,7 +250,7 @@ func TestTheScreenButtonAsksForTheScreenAndKeepsItsButtons(t *testing.T) {
 	a.Screen.Set(screentest.Resume())
 	r.PressOn(msg.ID, "s:laptop")
 	r.Eventually("told", func() bool { return answered(r, "Looking…") })
-	r.WaitSent("laptop's screen:")
+	r.WaitSent("laptop's screen**")
 	if len(r.TG.Cleared()) != 0 {
 		t.Fatal("asking for the screen used up the buttons")
 	}
@@ -276,7 +276,7 @@ func TestEachChatCommandReachesTheSession(t *testing.T) {
 	}
 
 	r.Say("/screen")
-	r.WaitSent("laptop's screen:")
+	r.WaitSent("laptop's screen**")
 	snapshot := r.SentWithButtons()[0]
 	if !strings.Contains(snapshot.Text, "Resume Session") || dataOf(snapshot, "↓") != "k:laptop:Down:" || dataOf(snapshot, "⏎") != "k:laptop:Enter:" {
 		t.Fatalf("%+v", snapshot)
@@ -294,7 +294,7 @@ func TestResumeShowsTheListOfSessions(t *testing.T) {
 	r.Say("/resume")
 	r.Eventually("typed", func() bool { return slices.Equal(a.Exec.Texts(), []string{"/resume"}) })
 	start := time.Now()
-	r.WaitSent("laptop's screen:")
+	r.WaitSent("laptop's screen**")
 	if took := time.Since(start); took < 500*time.Millisecond {
 		t.Errorf("the screen was read %v after the command, before the session could draw the list", took)
 	}
@@ -313,7 +313,7 @@ func TestChatCommandsFollowTheUsualRoutingOfCommands(t *testing.T) {
 	}
 	r.Eventually("asked for each", func() bool { return strings.Count(strings.Join(r.SentTexts(), "\n"), "No agent is chosen") == 6 })
 	r.Never("something reached an agent that was not chosen", 300*time.Millisecond, func() bool {
-		return len(laptop.Exec.Keys())+len(laptop.Exec.Texts())+len(nas.Exec.Keys())+len(nas.Exec.Texts()) > 0 || r.Sent("screen:")
+		return len(laptop.Exec.Keys())+len(laptop.Exec.Texts())+len(nas.Exec.Keys())+len(nas.Exec.Texts()) > 0 || r.Sent("screen**")
 	})
 
 	r.Say("/agent nas")
@@ -364,7 +364,7 @@ func TestTheMenuOffersOnlyWhatIsHarmlessToTap(t *testing.T) {
 	for _, n := range []string{"screen", "sessions", "stop"} {
 		r.Say("/" + n)
 	}
-	r.WaitSent("laptop's screen:")
+	r.WaitSent("laptop's screen**")
 	r.Eventually("typed", func() bool {
 		return len(r.Agents["laptop"].Exec.Texts()) == 1 && len(r.Agents["laptop"].Exec.Keys()) == 1
 	})

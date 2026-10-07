@@ -19,8 +19,9 @@ hub:
   chatId: ""            # required: the only chat that is obeyed
   userId: ""            # the only user that is obeyed; empty means the chat id
   defaultAgent: ""      # the agent that gets plain text until you choose one; empty: the hub asks first when it has several
-  deliveredReaction: "👍" # replaces it once the agent has typed the text into its session; "off" keeps the first one
-  receivedReaction: "👀" # emoji put on each of your messages once the hub has read it; "off" turns it off
+  deliveredReaction: "👀" # put on your message once the agent has got it and typed it into its session; "off" for no mark
+  failedReaction: "👎"    # put on your message when it did not get through (agent offline, bus refused, agent could not type it); "off" for none
+  receivedReaction: "off" # an early mark, put as soon as the hub has read your message and before the agent has; "off" for none
   logLevel: info
   offlineAfter: ""      # for example 3m; empty keeps the program's default
   textTTL: ""           # 10m by default

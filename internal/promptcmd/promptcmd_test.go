@@ -17,7 +17,7 @@ import (
 
 const (
 	permission = `{"message":"Claude needs your permission","notification_type":"permission_prompt"}`
-	plain      = "⏳ Claude needs your permission. Answer with /key N (the number of your choice), /enter or /esc."
+	plain      = "⏳ **Claude needs your permission**\n_Answer with /key N (the number of your choice), /enter or /esc._"
 )
 
 type queue struct {
@@ -127,7 +127,7 @@ func TestANotificationWithoutAMessageIsNotForwarded(t *testing.T) {
 func TestThePermissionNoticeShowsThePromptFromTheScreenWithAButtonForEachChoice(t *testing.T) {
 	p := &pane{screens: []string{screentest.Bash(1, "ls -la /tmp")}}
 	it := one(t, notify(t, permission, p))
-	want := "⏳ Claude needs your permission:\n" + screentest.Lines(
+	want := "⏳ **Claude needs your permission**\n```\n" + screentest.Lines(
 		" Bash command",
 		" List the files",
 		" │ ls -la /tmp",
@@ -136,7 +136,7 @@ func TestThePermissionNoticeShowsThePromptFromTheScreenWithAButtonForEachChoice(
 		"   2. Yes, and switch to auto mode",
 		"   3. No",
 		" Esc to cancel · Tab to amend",
-	) + "\n" + answerHint
+	) + "```\n\n_" + answerHint + "_" // Lines ends each line with a line break
 	if it.Body != want {
 		t.Fatalf("got %q\nwant %q", it.Body, want)
 	}
@@ -185,7 +185,7 @@ func TestAQuestionWithChoicesIsShownToo(t *testing.T) {
 		"no type":            `{"message":"Claude needs your input"}`,
 	} {
 		it := one(t, notify(t, payload, &pane{screens: []string{screentest.Question(1)}}))
-		if !strings.HasPrefix(it.Body, "⏳ Claude needs your input:\n Which colour do you want?\n ❯ 1. Red\n   2. Blue\n") || strings.Contains(it.Body, "I need to know") {
+		if !strings.HasPrefix(it.Body, "⏳ **Claude needs your input**\n```\n Which colour do you want?\n ❯ 1. Red\n   2. Blue\n") || strings.Contains(it.Body, "I need to know") {
 			t.Errorf("%s: %q", name, it.Body)
 		}
 		if len(it.Buttons) != 4 || it.Buttons[1].Label != "2. Blue" || it.Buttons[3].Key != "Escape" {
@@ -305,7 +305,7 @@ func TestAPromptWithHiddenValuesKeepsItsButtonsAndSaysSo(t *testing.T) {
 	if len(it.Buttons) != 4 || !strings.Contains(it.Body, "│ export TOKEN=<hidden>;ls\n") {
 		t.Fatalf("%+v", it)
 	}
-	if !strings.Contains(it.Body, "\n"+hiddenNote+"\n\n"+answerHint) || strings.Contains(it.Body, tooLong) {
+	if !strings.Contains(it.Body, "\n```\n_"+hiddenNote+"_\n\n_"+answerHint+"_") || strings.Contains(it.Body, tooLong) {
 		t.Errorf("%q", it.Body)
 	}
 	if plain := one(t, notify(t, permission, &pane{screens: []string{screentest.Bash(1, "ls")}})); strings.Contains(plain.Body, hiddenNote) {
@@ -332,14 +332,15 @@ func TestTheButtonsHideSecretsToo(t *testing.T) {
 func TestPunctuationAtTheEndOfTheMessageIsNotDoubled(t *testing.T) {
 	msg := func(m string) string { return fmt.Sprintf(`{"message":%q,"notification_type":"permission_prompt"}`, m) }
 	it := one(t, notify(t, msg("Claude needs your permission to use Bash."), &pane{screens: []string{screentest.Bash(1, "ls")}}))
-	if !strings.HasPrefix(it.Body, "⏳ Claude needs your permission to use Bash:\n Bash command\n") {
+	if !strings.HasPrefix(it.Body, "⏳ **Claude needs your permission to use Bash**\n```\n Bash command\n") {
 		t.Errorf("%q", it.Body)
 	}
 	for in, want := range map[string]string{
-		"Claude needs your permission to use Bash.": "⏳ Claude needs your permission to use Bash. " + plainHint,
-		"Claude needs you!?":                        "⏳ Claude needs you. " + plainHint,
-		"Waiting...":                                "⏳ Waiting. " + plainHint,
-		"two\nlines":                                "⏳ two lines. " + plainHint,
+		"Claude needs your permission to use Bash.": "⏳ **Claude needs your permission to use Bash**\n_" + plainHint + "_",
+		"Claude needs you!?":                        "⏳ **Claude needs you**\n_" + plainHint + "_",
+		"Waiting...":                                "⏳ **Waiting**\n_" + plainHint + "_",
+		"two\nlines":                                "⏳ **two lines**\n_" + plainHint + "_",
+		"a *bold* `claim`":                          "⏳ **a bold claim**\n_" + plainHint + "_", // a mark in the headline would close its bold early
 	} {
 		if it := one(t, notify(t, msg(in), nil)); it.Body != want {
 			t.Errorf("%q: %q", in, it.Body)
@@ -393,12 +394,12 @@ func TestInputIsBounded(t *testing.T) {
 // buttons to move, and no hash on those (there is no prompt to tie them to).
 func TestASnapshotIsThePromptOrTheBottomOfTheScreen(t *testing.T) {
 	n := Snapshot("laptop", screentest.Bash(1, "ls"))
-	if !strings.HasPrefix(n.Body, "⏳ Claude Code is waiting for an answer:\n Bash command") || len(n.Buttons) != 4 || n.Buttons[0].Prompt == "" {
+	if !strings.HasPrefix(n.Body, "⏳ **Claude Code is waiting for an answer**\n```\n Bash command") || len(n.Buttons) != 4 || n.Buttons[0].Prompt == "" {
 		t.Errorf("%+v", n)
 	}
 
 	n = Snapshot("laptop", screentest.Resume())
-	if !strings.HasPrefix(n.Body, "📺 laptop's screen:\n") || !strings.Contains(n.Body, "Resume Session") || !strings.Contains(n.Body, "fix the build") {
+	if !strings.HasPrefix(n.Body, "📺 **laptop's screen**\n```\n") || !strings.Contains(n.Body, "Resume Session") || !strings.Contains(n.Body, "fix the build") {
 		t.Errorf("%q", n.Body)
 	}
 	var keys []string
@@ -434,7 +435,7 @@ func TestASnapshotKeepsTheBottomHidesSecretsAndSurvivesAnEmptyScreen(t *testing.
 	if strings.Contains(n.Body, "hunter2secret") || !strings.Contains(n.Body, "<hidden>") {
 		t.Errorf("secret: %q", n.Body)
 	}
-	if strings.Contains(n.Body, "line 30\n") || !strings.Contains(n.Body, "line 60") || strings.Count(n.Body, "\n") != 25 {
+	if strings.Contains(n.Body, "line 30\n") || !strings.Contains(n.Body, "line 60") || strings.Count(n.Body, "\n") != 27 /* the header, the fence, 25 lines, the closing fence */ {
 		t.Errorf("not the bottom 25 lines: %q", n.Body)
 	}
 

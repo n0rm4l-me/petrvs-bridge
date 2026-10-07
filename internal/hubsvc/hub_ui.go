@@ -224,7 +224,8 @@ func buttonData(agent string, b wire.Button) (string, bool) {
 // messageFor is the message to show for a reply, notice or alert of an agent: the text, with buttons when the agent sent
 // some.
 func (h *Hub) messageFor(agent string, p *wire.Payload, text string) telegram.Message {
-	m := telegram.Message{Text: text}
+	// What an agent says is Markdown: the assistant writes it, and the agent's own notices use it for the screen and the prompt.
+	m := telegram.Message{Text: text, Markdown: true}
 	var row []telegram.Button
 	left := 0
 	for _, b := range p.Buttons {

@@ -41,7 +41,7 @@ func TestTheButtonsOfAMessageExpireAfterFifteenMinutes(t *testing.T) {
 	r.PressOn(fresh.ID, "s:laptop") // the screen button of an old message is just as old
 	r.Eventually("told again", func() bool { return strings.Count(strings.Join(r.TG.Answered(), "\n"), expired) == 2 })
 	r.Never("an expired tap pressed a key or asked for the screen", 300*time.Millisecond, func() bool {
-		return len(a.Exec.Keys()) != 1 || r.Sent("screen:")
+		return len(a.Exec.Keys()) != 1 || r.Sent("screen**")
 	})
 	if got := r.TG.Cleared(); !slices.Equal(got, []int64{old.ID}) {
 		t.Fatalf("buttons taken off %v, want only the message that was answered", got)

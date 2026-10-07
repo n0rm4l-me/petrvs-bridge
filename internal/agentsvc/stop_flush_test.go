@@ -2,6 +2,7 @@ package agentsvc
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -117,5 +118,24 @@ func TestRunFlushesTheSpoolWhenItsContextEnds(t *testing.T) {
 	}
 	if got := r.messagesOut(); got != 1 {
 		t.Fatalf("%d messages reached the bus when Run stopped, want 1", got)
+	}
+}
+
+// A command the agent cannot carry out is reported with its id, so that the hub can mark the message it came from; one that
+// worked is reported as done.
+func TestAFailedCommandIsReportedWithItsId(t *testing.T) {
+	r := newDownRig(t, nil)
+	ctx := context.Background()
+	r.ex.err = errors.New("tmux: no such session")
+	r.a.execute(ctx, &wire.Payload{ID: "cmd-77", Type: wire.TypeText, Body: "hello"})
+	got := r.sent()
+	if len(got) != 1 || got[0].Type != wire.TypeDropped || got[0].Meta[wire.MetaCommand] != "cmd-77" {
+		t.Fatalf("%+v", got)
+	}
+	r.ex.err = nil
+	r.a.execute(ctx, &wire.Payload{ID: "cmd-78", Type: wire.TypeText, Body: "hello"})
+	got = r.sent()
+	if len(got) != 1 || got[0].Type != wire.TypeDone || got[0].Body != "cmd-78" {
+		t.Fatalf("%+v", got)
 	}
 }
