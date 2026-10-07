@@ -1,0 +1,17 @@
+The hub {{ include "hub.fullname" . }} is installed. It listens on nothing; it talks to Telegram and to Pub/Sub.
+
+Before it can work, these must exist:
+
+1. Secrets (never in the values):
+     kubectl create secret generic {{ .Values.secrets.botToken.existingSecret }} --from-file={{ .Values.secrets.botToken.key }}=/path/to/token-file
+     kubectl create secret generic {{ .Values.secrets.identity.existingSecret }} --from-file={{ .Values.secrets.identity.fileName }}=/path/to/hub.identity.json
+
+2. Pub/Sub topics and subscriptions in project {{ .Values.pubsub.project }} (the hub does not create them):
+     {{ .Values.pubsub.prefix }}-to-hub            topic; subscription {{ .Values.pubsub.prefix }}-hub
+     {{ .Values.pubsub.prefix }}-to-agent-NAME     topic; subscription {{ .Values.pubsub.prefix }}-agent-NAME, for each agent NAME
+   with message retention 1h and no subscription expiry (see the README).
+
+3. Access for the hub's service account {{ include "hub.serviceAccountName" . }}: publisher on each agent topic and
+   subscriber on {{ .Values.pubsub.prefix }}-hub.
+
+Check the hub with:  kubectl logs deploy/{{ include "hub.fullname" . }}

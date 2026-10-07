@@ -1,4 +1,4 @@
-# Build:  docker build -f deploy/hub.Dockerfile -t claude-bridge-hub .
+# Build:  docker build -f deploy/hub.Dockerfile -t petrvs-bridge-hub .
 # NOT YET BUILT OR RUN: a starting point. Pin the base images by digest before you use it.
 FROM golang:1.26 AS build
 WORKDIR /src

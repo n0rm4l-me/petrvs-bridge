@@ -4,7 +4,7 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: claude-bridge-hub
+  name: petrvs-bridge-hub
   annotations:
     iam.gke.io/gcp-service-account: HUB_SA@PROJECT.iam.gserviceaccount.com   # workload identity
 automountServiceAccountToken: false
@@ -12,18 +12,18 @@ automountServiceAccountToken: false
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: claude-bridge-hub
+  name: petrvs-bridge-hub
 spec:
   replicas: 1                      # two hubs would fight over one bot
   strategy:
     type: Recreate
   selector:
-    matchLabels: {app: claude-bridge-hub}
+    matchLabels: {app: petrvs-bridge-hub}
   template:
     metadata:
-      labels: {app: claude-bridge-hub}
+      labels: {app: petrvs-bridge-hub}
     spec:
-      serviceAccountName: claude-bridge-hub
+      serviceAccountName: petrvs-bridge-hub
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -33,21 +33,21 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: hub
-          image: REGISTRY/claude-bridge-hub@sha256:DIGEST
+          image: REGISTRY/petrvs-bridge-hub@sha256:DIGEST
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: {drop: ["ALL"]}
           env:
-            - {name: CB_PROJECT, value: PROJECT}
-            - {name: CB_PREFIX, value: cb}
-            - {name: CB_IDENTITY, value: /keys/hub.identity.json}
-            - {name: CB_AGENTS_DIR, value: /agents}
-            - {name: CB_CHAT_ID, value: "CHAT_ID"}
-            - {name: CB_ALLOW_GROUP_READ, value: "true"}      # the secret volume is group-readable because of fsGroup
-            - {name: CB_LOCK_FILE, value: /state/lockdown}    # survives a container restart, not a deleted pod
+            - {name: PB_PROJECT, value: PROJECT}
+            - {name: PB_PREFIX, value: pb}
+            - {name: PB_IDENTITY, value: /keys/hub.identity.json}
+            - {name: PB_AGENTS_DIR, value: /agents}
+            - {name: PB_CHAT_ID, value: "CHAT_ID"}
+            - {name: PB_ALLOW_GROUP_READ, value: "true"}      # the secret volume is group-readable because of fsGroup
+            - {name: PB_LOCK_FILE, value: /state/lockdown}    # survives a container restart, not a deleted pod
             - name: TELEGRAM_BOT_TOKEN
-              valueFrom: {secretKeyRef: {name: claude-bridge-bot, key: token}}
+              valueFrom: {secretKeyRef: {name: petrvs-bridge-bot, key: token}}
           resources:
             requests: {cpu: 50m, memory: 64Mi}
             limits: {cpu: 100m, memory: 128Mi}
@@ -59,18 +59,18 @@ spec:
         - name: state
           emptyDir: {sizeLimit: 1Mi}
         - name: keys
-          secret: {secretName: claude-bridge-hub-identity, defaultMode: 0440}
+          secret: {secretName: petrvs-bridge-hub-identity, defaultMode: 0440}
         - name: agents
-          configMap: {name: claude-bridge-agents}
+          configMap: {name: petrvs-bridge-agents}
 ---
 # Only outbound traffic to Telegram and Google APIs is needed; nothing listens.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: claude-bridge-hub
+  name: petrvs-bridge-hub
 spec:
   podSelector:
-    matchLabels: {app: claude-bridge-hub}
+    matchLabels: {app: petrvs-bridge-hub}
   policyTypes: [Ingress, Egress]
   egress:
     - ports:

@@ -1,0 +1,119 @@
+{{- $project := required "pubsub.project is required" .Values.pubsub.project -}}
+{{- $chat := required "hub.chatId is required" .Values.hub.chatId -}}
+{{- if and (not .Values.agents.existingConfigMap) (not .Values.agents.files) -}}
+{{- fail "agents.files or agents.existingConfigMap is required: the hub accepts only agents whose public bundle it has" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "hub.fullname" . }}
+  labels:
+    {{- include "hub.labels" . | nindent 4 }}
+spec:
+  replicas: 1                      # two hubs would fight over one bot, so this is not a value
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "hub.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "hub.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- if and (not .Values.agents.existingConfigMap) .Values.agents.files }}
+        checksum/agents: {{ toYaml .Values.agents.files | sha256sum }}   # a changed agent list restarts the hub
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "hub.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532                 # lets the non-root user read the mounted secret (mode 0440 below)
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: hub
+          image: {{ include "hub.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          env:
+            - {name: PB_PROJECT, value: {{ $project | quote }}}
+            - {name: PB_PREFIX, value: {{ .Values.pubsub.prefix | quote }}}
+            - {name: PB_IDENTITY, value: {{ printf "/keys/%s" .Values.secrets.identity.fileName | quote }}}
+            - {name: PB_AGENTS_DIR, value: /agents}
+            - {name: PB_CHAT_ID, value: {{ $chat | quote }}}
+            {{- with .Values.hub.userId }}
+            - {name: PB_USER_ID, value: {{ . | quote }}}
+            {{- end }}
+            - {name: PB_ALLOW_GROUP_READ, value: "true"}      # the secret volume is group-readable because of fsGroup
+            - {name: PB_LOCK_FILE, value: /state/lockdown}    # survives a container restart, not a deleted pod
+            - {name: PB_LOG_LEVEL, value: {{ .Values.hub.logLevel | quote }}}
+            - {name: PB_RECEIVED_REACTION, value: {{ .Values.hub.receivedReaction | quote }}}
+            - {name: PB_DELIVERED_REACTION, value: {{ .Values.hub.deliveredReaction | quote }}}
+            {{- with .Values.hub.defaultAgent }}
+            - {name: PB_DEFAULT_AGENT, value: {{ . | quote }}}
+            {{- end }}
+            {{- with .Values.hub.offlineAfter }}
+            - {name: PB_OFFLINE_AFTER, value: {{ . | quote }}}
+            {{- end }}
+            {{- with .Values.hub.textTTL }}
+            - {name: PB_TEXT_TTL, value: {{ . | quote }}}
+            {{- end }}
+            {{- with .Values.hub.keyTTL }}
+            - {name: PB_KEY_TTL, value: {{ . | quote }}}
+            {{- end }}
+            {{- with .Values.hub.maxReplyBytes }}
+            - {name: PB_MAX_REPLY_BYTES, value: {{ . | quote }}}
+            {{- end }}
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.botToken.existingSecret }}
+                  key: {{ .Values.secrets.botToken.key }}
+            {{- with .Values.hub.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: keys, mountPath: /keys, readOnly: true}
+            - {name: agents, mountPath: /agents, readOnly: true}
+            - {name: state, mountPath: /state}
+      volumes:
+        - name: state
+          emptyDir: {sizeLimit: 1Mi}
+        - name: keys
+          secret:
+            secretName: {{ .Values.secrets.identity.existingSecret }}
+            defaultMode: 0440
+        - name: agents
+          configMap:
+            name: {{ include "hub.agentsConfigMap" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

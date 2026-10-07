@@ -1,0 +1,65 @@
+# Values for the hub. NOT YET INSTALLED ON A CLUSTER: check `helm lint` and `helm template` output before you use it.
+# Secrets never go into these values: the bot token and the hub's private identity are read from Kubernetes Secrets
+# that you create yourself (see NOTES.txt after an install).
+
+image:
+  repository: ""        # for example REGION-docker.pkg.dev/PROJECT/REPOSITORY/petrvs-bridge-hub
+  digest: ""            # sha256:..., preferred: an immutable reference
+  tag: ""               # used when no digest is given
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+pubsub:
+  project: ""           # required: the Google Cloud project that holds the topics and subscriptions
+  prefix: pb            # the resources are called PREFIX-to-hub, PREFIX-hub, PREFIX-to-agent-NAME, PREFIX-agent-NAME
+
+hub:
+  chatId: ""            # required: the only chat that is obeyed (a string, so that a long number stays exact)
+  userId: ""            # the only user that is obeyed; empty means the chat id
+  defaultAgent: ""      # the agent that gets plain text until you choose one; empty: the hub asks first when it has several
+  deliveredReaction: "👍" # replaces it once the agent has typed the text into its session; "off" keeps the first one
+  receivedReaction: "👀" # emoji put on each of your messages once the hub has read it; "off" turns it off
+  logLevel: info
+  offlineAfter: ""      # for example 3m; empty keeps the program's default
+  textTTL: ""           # 10m by default
+  keyTTL: ""            # 1m by default
+  maxReplyBytes: ""
+  extraEnv: []          # more environment variables, in the Kubernetes {name, value} form
+
+secrets:
+  botToken:
+    existingSecret: petrvs-bridge-bot            # a Secret with the bot token under the key below
+    key: token
+  identity:
+    existingSecret: petrvs-bridge-hub-identity   # a Secret that holds the hub's private identity file
+    fileName: hub.identity.json
+
+agents:
+  # The agents that may connect: one NAME.pub.json per agent (public bundles, not secret). Either give them here ...
+  files: {}
+  #   laptop.pub.json: |
+  #     {...}
+  # ... or point at a ConfigMap that you manage yourself (then `files` is ignored).
+  existingConfigMap: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}       # on GKE with Workload Identity: iam.gke.io/gcp-service-account: HUB_SA@PROJECT.iam.gserviceaccount.com
+
+podAnnotations: {}
+podLabels: {}
+resources:
+  requests: {cpu: 50m, memory: 64Mi}
+  limits: {cpu: 100m, memory: 128Mi}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+networkPolicy:
+  enabled: true
+  # Only outbound traffic is needed (Telegram and Google APIs, DNS); nothing listens. Further egress rules go here.
+  extraEgress: []
+  # GKE Workload Identity reaches Google through a metadata server on the node. With a network policy that server has to
+  # be allowed explicitly: 169.254.169.252:988 (and 169.254.169.254:80 on Dataplane V2). Turn this off elsewhere.
+  allowGKEMetadataServer: true

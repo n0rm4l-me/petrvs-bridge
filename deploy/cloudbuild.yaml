@@ -1,0 +1,8 @@
+# Builds the hub image in Google Cloud Build, for a machine without Docker. NOT YET RUN.
+#   gcloud builds submit --config deploy/cloudbuild.yaml --substitutions _IMAGE=REGION-docker.pkg.dev/PROJECT/REPO/petrvs-bridge-hub:0.1.0 .
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: [build, -f, deploy/hub.Dockerfile, -t, "${_IMAGE}", .]
+images: ["${_IMAGE}"]
+substitutions:
+  _IMAGE: REGION-docker.pkg.dev/PROJECT/REPO/petrvs-bridge-hub:0.1.0
