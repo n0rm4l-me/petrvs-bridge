@@ -78,6 +78,11 @@ type Config struct {
 	// fast as the receipts come would have messages refused and lost. Negative turns the pacing off (tests with a clock
 	// that does not move).
 	MinTurn time.Duration
+	// StopFlush is how long the agent, once told to stop, spends sending the messages that are in the spool and not out yet
+	// (default 3s). A reply that a hook queued a moment before the machine went down would otherwise wait in the spool until
+	// the agent runs again. It is the time to hand them to the bus, not to wait for the hub's receipts; the files stay until
+	// those come. Negative turns it off.
+	StopFlush time.Duration
 }
 
 // Stats counts what the agent has seen; the counters never include message content.
@@ -183,6 +188,9 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.MinTurn == 0 {
 		cfg.MinTurn = 250 * time.Millisecond
 	}
+	if cfg.StopFlush == 0 {
+		cfg.StopFlush = 3 * time.Second
+	}
 	a := &Agent{cfg: cfg, log: cfg.Log.With("agent", cfg.Identity.Name), pending: map[string]pendingHello{}, seenIDs: map[string]struct{}{},
 		awaiting: map[string]awaitingReceipt{}, cmdNext: 1, cmdQ: map[uint64]*wire.Payload{}, cmdWake: make(chan struct{}, 1), spoolWake: make(chan struct{}, 1)}
 	if cfg.Spool != nil {
@@ -274,6 +282,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	select {
 	case <-ctx.Done():
+		a.flushSpool(ctx)
 		return nil
 	case err := <-errc:
 		return err
@@ -385,6 +394,31 @@ func (a *Agent) spoolTick(ctx context.Context) {
 		return
 	}
 	a.sendBatch(ctx, s, a.nextBatch())
+}
+
+// flushSpool is the last pass over the spool, made when the agent is told to stop: what a hook queued in the seconds before
+// (the answer of a turn that ended with a shutdown, say) goes to the bus now instead of waiting for the next start. The
+// stopped context is only the reason to be here; the pass has its own time limit (Config.StopFlush). Messages that are
+// out already are not sent again, and none is waited for: their files stay until the hub's receipt, as always.
+func (a *Agent) flushSpool(ctx context.Context) {
+	if a.cfg.Spool == nil || a.cfg.StopFlush < 0 {
+		return
+	}
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), a.cfg.StopFlush)
+	defer cancel()
+	a.spoolMu.Lock()
+	defer a.spoolMu.Unlock()
+	s := a.session()
+	if s == nil {
+		return
+	}
+	a.turnAt = time.Time{} // the pace protects the hub's budget of keys; nothing else will be sent after this pass
+	batch := a.nextBatch()
+	if len(batch) == 0 {
+		return
+	}
+	a.log.Info("sending the queued messages before stopping", "messages", len(batch))
+	a.sendBatch(fctx, s, batch)
 }
 
 // sendBatch seals every message of the batch before it publishes the first. The ratchet changes the key it sends with

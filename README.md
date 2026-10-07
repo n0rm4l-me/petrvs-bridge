@@ -341,6 +341,28 @@ The Stop hook also sends the pictures that Claude read during the turn (`Read` o
 still exist; at most 3 per turn, each once), right after the answer, with `agent send-file`. `PB_FORWARD_IMAGES=off` turns
 that off.
 
+[examples/claude-pretool-hook.sh](examples/claude-pretool-hook.sh) is a `PreToolUse` hook for every tool (no matcher). The Stop
+hook speaks when a turn ends, and a turn can take ten minutes: the words Claude writes between its actions ("I read the code
+first", "the build passes, now the tests") stay in the transcript and reach the chat in one lump at the end. Before each tool
+call this hook queues the text of the turn so far, at most once in `PB_PROGRESS_EVERY` seconds (default 20, `0` turns it off);
+text written in between goes with the next call or at the end of the turn. Parallel calls take a lock, so the text is queued
+once, and the Stop hook does not send again what the hook has sent.
+
+The same hook covers a turn that ends with a shutdown, which never gets to the Stop hook: the machine is gone before the answer
+is written. Before a Bash command that looks like it will take the machine or the bridge down (`shutdown`, `reboot`, `halt`,
+`poweroff`, `osascript` shut down, restart or log out, `pmset sleepnow`, `systemctl poweroff`, `tmux kill-session`,
+`pkill agent`, `launchctl bootout`, and so on) it queues the text at once, queues a notice that such a command is coming
+(without the command, which may hold secrets), and waits until the spool is empty, which is when the hub has had the messages
+written to the chat, or `PB_FLUSH_WAIT` seconds (default 10, `0` to not wait). Then the command runs: the hook never blocks a
+tool and never answers the permission question. The commands are recognised by their text, so a shutdown behind a script or a
+variable goes unseen; `PB_FLUSH_PATTERN` adds an extended regular expression for the ones you know of. It needs jq, the `agent`
+binary and `claude-stop-hook.sh` in the same directory.
+
+The agent also makes a last pass over the spool when it is told to stop (SIGTERM or Ctrl-C): messages that are queued and not
+out yet are handed to the bus, for up to 3 seconds, so that an answer queued a moment before a service restart does not wait
+for the next start. The files stay until the hub's receipt, as always. This helps when the hub is somewhere else; on one
+machine with the hub it is the PreToolUse hook that covers a shutdown, because the hub stops at the same moment.
+
 [examples/claude-notify-hook.sh](examples/claude-notify-hook.sh) is the `Notification` hook. It runs `agent prompt`, which
 reads the prompt from the screen of the tmux pane that Claude Code runs in (`TMUX_PANE`, which Claude Code inherits from
 tmux) and sends it to the chat with one button per choice and an Esc button, so that you can answer from the phone knowing

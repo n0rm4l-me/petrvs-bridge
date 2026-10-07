@@ -38,6 +38,9 @@ for _ in 1 2 3 4 5 6; do
   LINES=$(sed -n "${START},${TOTAL}p" "$TRANSCRIPT" | grep '"type":"assistant"' || true)
   TEXT=$(printf '%s\n' "$LINES" |
     jq -rs '[.[].message.content[]? | select(.type == "text") | .text] | join("\n\n")' 2>/dev/null || true)
+  # claude-pretool-hook.sh runs this script with PB_EARLY set, before a command that may take the machine down: the turn
+  # goes on after this run, so what is written so far is all there is to take, and there is no final answer to wait for.
+  [ -z "${PB_EARLY:-}" ] || break
   if [ -n "$TEXT" ] && [ "$TEXT" != "null" ]; then
     DONE=$(printf '%s\n' "$LINES" | jq -rs 'last | if .message.stop_reason == "tool_use" or ([.message.content[]? | select(.type == "text")] | length) == 0 then "no" else "yes" end' 2>/dev/null || true)
     [ "$DONE" = "yes" ] && break
