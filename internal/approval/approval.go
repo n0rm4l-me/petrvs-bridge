@@ -24,6 +24,8 @@ import (
 const (
 	Period = 30 * time.Second
 	Digits = 6
+	// MaxLockout caps the lockout, which doubles with each one that follows another without a success.
+	MaxLockout = 24 * time.Hour
 )
 
 var (
@@ -76,7 +78,8 @@ func codeForStep(secret []byte, counter int64, digits int) string {
 func Code(secret []byte, t time.Time) string { return codeForStep(secret, step(t), Digits) }
 
 // Verifier accepts each code once, allows one step of clock drift either way,
-// and locks after repeated failures.
+// and locks after repeated failures. Each lockout that follows another without a valid code in between lasts twice as
+// long (Lockout, 2 x, 4 x ... up to MaxLockout), so whoever controls the chat cannot keep guessing at a fixed rate.
 type Verifier struct {
 	secret   []byte
 	MaxFails int
@@ -86,12 +89,14 @@ type Verifier struct {
 	lastStep    int64
 	fails       int
 	lockedUntil time.Time
-	path        string // where lastStep and lockedUntil are kept, if anywhere
+	level       int    // lockouts in a row since the last valid code
+	path        string // where lastStep, lockedUntil and level are kept, if anywhere
 }
 
 type verifierState struct {
 	LastStep    int64 `json:"last_step"`
 	LockedUntil int64 `json:"locked_until,omitempty"`
+	Level       int   `json:"level,omitempty"` // absent in files from before the escalation: level 0
 }
 
 // Persist keeps the verifier's memory of used codes and of a lockout in a file (0600), so that restarting the program
@@ -118,6 +123,9 @@ func (v *Verifier) Persist(path string, now time.Time) error {
 	if st.LockedUntil > 0 {
 		v.lockedUntil = time.Unix(st.LockedUntil, 0)
 	}
+	if st.Level > 0 {
+		v.level = st.Level
+	}
 	return nil
 }
 
@@ -125,7 +133,7 @@ func (v *Verifier) save() error {
 	if v.path == "" {
 		return nil
 	}
-	st := verifierState{LastStep: v.lastStep}
+	st := verifierState{LastStep: v.lastStep, Level: v.level}
 	if !v.lockedUntil.IsZero() {
 		st.LockedUntil = v.lockedUntil.Unix()
 	}
@@ -146,13 +154,29 @@ func (v *Verifier) save() error {
 		tmp.Close()
 		return err
 	}
+	if err := tmp.Sync(); err != nil { // without it a power cut can leave the renamed file empty
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), v.path)
+	if err := os.Rename(tmp.Name(), v.path); err != nil {
+		return err
+	}
+	syncDir(filepath.Dir(v.path))
+	return nil
 }
 
-// NewVerifier returns a verifier with 5 failures allowed and a 5 minute lockout.
+// syncDir makes a rename survive a power cut. Best effort: not every filesystem lets a directory be synced.
+func syncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
+		d.Sync()
+		d.Close()
+	}
+}
+
+// NewVerifier returns a verifier with 5 failures allowed and a 5 minute first lockout.
 func NewVerifier(secret []byte) *Verifier {
 	return &Verifier{secret: append([]byte(nil), secret...), MaxFails: 5, Lockout: 5 * time.Minute, lastStep: -1}
 }
@@ -172,10 +196,10 @@ func (v *Verifier) Verify(code string, now time.Time) error {
 			if s <= v.lastStep {
 				return ErrReused
 			}
-			prev := v.lastStep
-			v.lastStep = s
+			prev, prevLevel := v.lastStep, v.level
+			v.lastStep, v.level = s, 0
 			if err := v.save(); err != nil {
-				v.lastStep = prev
+				v.lastStep, v.level = prev, prevLevel
 				return ErrState
 			}
 			v.fails = 0
@@ -184,9 +208,16 @@ func (v *Verifier) Verify(code string, now time.Time) error {
 	}
 	v.fails++
 	if v.fails >= v.MaxFails {
-		v.lockedUntil = now.Add(v.Lockout)
+		d := v.Lockout
+		for i := 0; i < v.level && d < MaxLockout; i++ {
+			d = min(2*d, MaxLockout)
+		}
+		v.lockedUntil = now.Add(d)
+		v.level++
 		v.fails = 0
-		v.save() // best effort: the lockout still holds in memory
+		// Best effort: the lockout still holds in memory. lastStep is unchanged on this path, so a failed save cannot
+		// make a used code usable again; at worst a restart forgets the lockout.
+		v.save()
 		return ErrLocked
 	}
 	return ErrBadCode

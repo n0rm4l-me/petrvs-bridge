@@ -53,6 +53,8 @@ type Hub struct {
 	ReceivedReaction string
 	// DeliveredReaction replaces it when the agent has typed the command into the session; empty means it stays.
 	DeliveredReaction string
+	// MaxFileBytes bounds a file in either direction; 0 was replaced by the default (20 MiB).
+	MaxFileBytes int64
 }
 
 // Agent holds the agent's settings.
@@ -75,6 +77,54 @@ type Agent struct {
 	ReceiptTimeout time.Duration
 	ReorderWindow  time.Duration
 	AlarmCodeState string // where used one-time codes are remembered across restarts
+
+	// Workdir is the directory Claude Code runs in; empty when not set.
+	Workdir string
+	// InboxDir is where files from the chat are saved.
+	InboxDir string
+	// MaxFileBytes bounds a file in either direction; 0 was replaced by the default (20 MiB).
+	MaxFileBytes int64
+	// Heal turns on starting Claude Code again when it has stopped (needs Workdir); ClaudeCommand is what is run,
+	// HealGrace how long the pane must be without it first, HealTries the starts allowed within HealWindow.
+	Heal          bool
+	ClaudeCommand string
+	HealGrace     time.Duration
+	HealTries     int
+	HealWindow    time.Duration
+	// StuckAfter is how long a request may go without a reply before the chat is told; 0 turns the check off.
+	StuckAfter time.Duration
+}
+
+// MaxFileLimit is the most a file may be allowed to weigh: what a bot can upload to Telegram.
+const MaxFileLimit = 50 << 20
+
+// DefaultMaxFileBytes applies when no limit is set.
+const DefaultMaxFileBytes = 20 << 20
+
+// parseOffDuration reads a duration that may also be "0" or "off", meaning none.
+func parseOffDuration(e *env, key, v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "0" || strings.EqualFold(v, "off") {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		e.err = append(e.err, key+": "+strconv.Quote(v)+" is not a positive duration (for example 10m), 0 or off")
+		return 0
+	}
+	return d
+}
+
+// checkFileLimit returns the limit to use and reports a value that is negative or above what Telegram takes.
+func checkFileLimit(e *env, n int64) int64 {
+	switch {
+	case n < 0 || n > MaxFileLimit:
+		e.err = append(e.err, fmt.Sprintf("max-file-bytes: 0 (the default, %d) to %d", int64(DefaultMaxFileBytes), int64(MaxFileLimit)))
+		return DefaultMaxFileBytes
+	case n == 0:
+		return DefaultMaxFileBytes
+	}
+	return n
 }
 
 type env struct {
@@ -202,8 +252,13 @@ func (c *Common) validate(e *env, needProject bool) {
 	if c.Identity == "" {
 		e.err = append(e.err, "identity: set PB_IDENTITY or -identity")
 	}
-	if needProject && c.Project == "" {
-		e.err = append(e.err, "project: set PB_PROJECT or -project (not needed with the emulator)")
+	if c.Project == "" {
+		if needProject {
+			e.err = append(e.err, "project: set PB_PROJECT or -project (not needed with the emulator)")
+		} else {
+			// The emulator accepts any project, but the Pub/Sub client refuses an empty one.
+			c.Project = emulatorProject
+		}
 	}
 	if !identity.ValidName(c.Prefix) {
 		e.err = append(e.err, "prefix: lower-case letters, digits, - and _")
@@ -224,12 +279,38 @@ func finish(e *env) error {
 
 func emulator(e *env) bool { return e.get("PUBSUB_EMULATOR_HOST") != "" }
 
+// emulatorProject is the project id used with the emulator when none is set. Hub and agent must use the same one, as
+// the emulator keeps its topics per project.
+const emulatorProject = "emulator"
+
+// Where the usage goes. Tests replace them.
+var usageOut, usageErr io.Writer = os.Stdout, os.Stderr
+
+// parseFlags parses the command line. The flag package's own messages are discarded and replaced by these: a request for
+// help (-h, --help) prints the usage with every flag's default on standard output and comes back as an error that
+// satisfies errors.Is(err, flag.ErrHelp), which the program should answer with exit status 0; any other mistake prints
+// the usage on standard error. The error names the program; the caller prints it.
+func parseFlags(fs *flag.FlagSet, args []string) error {
+	fs.SetOutput(io.Discard)
+	err := fs.Parse(args)
+	if err == nil {
+		return nil
+	}
+	out := usageErr
+	if errors.Is(err, flag.ErrHelp) {
+		out = usageOut
+	}
+	fs.SetOutput(out)
+	fmt.Fprintf(out, "Usage of %s (every flag can also be set by the environment variable named in its description):\n", fs.Name())
+	fs.PrintDefaults()
+	return fmt.Errorf("%s: %w", fs.Name(), err)
+}
+
 // ParseHub reads the hub's settings.
 func ParseHub(args []string, getenv func(string) string) (*Hub, error) {
 	e := &env{get: getenv}
 	h := &Hub{}
 	fs := flag.NewFlagSet("hub", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
 	common(fs, e, &h.Common)
 	fs.StringVar(&h.AgentsDir, "agents-dir", e.str("PB_AGENTS_DIR", ""), "directory holding one *.pub.json per agent that may connect (env PB_AGENTS_DIR)")
 	fs.StringVar(&h.TelegramBase, "telegram-api", e.str("PB_TELEGRAM_API_BASE", "https://api.telegram.org"), "Bot API base URL (env PB_TELEGRAM_API_BASE)")
@@ -240,13 +321,15 @@ func ParseHub(args []string, getenv func(string) string) (*Hub, error) {
 	fs.DurationVar(&h.KeyTTL, "key-ttl", e.dur("PB_KEY_TTL", time.Minute), "how long a key press or alarm command stays valid (env PB_KEY_TTL)")
 	fs.DurationVar(&h.PollTimeout, "poll-timeout", e.dur("PB_POLL_TIMEOUT", 25*time.Second), "Telegram long-poll timeout (env PB_POLL_TIMEOUT)")
 	fs.IntVar(&h.MaxReplyBytes, "max-reply-bytes", int(e.int64("PB_MAX_REPLY_BYTES")), "longest reply shown in the chat; 0 means 20000 (env PB_MAX_REPLY_BYTES)")
+	fs.Int64Var(&h.MaxFileBytes, "max-file-bytes", e.int64("PB_MAX_FILE_BYTES"), "largest file in either direction; 0 means 20 MiB, at most 50 MiB (env PB_MAX_FILE_BYTES)")
 	fs.StringVar(&h.LockFile, "lock-file", e.str("PB_LOCK_FILE", ""), "file that keeps a lockdown across restarts of the hub; empty means a restart ends it (env PB_LOCK_FILE)")
 	fs.StringVar(&h.DefaultAgent, "default-agent", e.str("PB_DEFAULT_AGENT", ""), "agent that gets plain text until you choose one; empty means the hub asks first when it has several (env PB_DEFAULT_AGENT)")
 	reaction := fs.String("received-reaction", e.str("PB_RECEIVED_REACTION", "👀"), "emoji put on each message of yours once the hub has read it, or off (env PB_RECEIVED_REACTION)")
 	delivered := fs.String("delivered-reaction", e.str("PB_DELIVERED_REACTION", "👍"), "emoji that replaces it once the agent has typed the text into the session, or off (env PB_DELIVERED_REACTION)")
-	if err := fs.Parse(args); err != nil {
-		return nil, fmt.Errorf("hub: %w", err)
+	if err := parseFlags(fs, args); err != nil {
+		return nil, err
 	}
+	h.MaxFileBytes = checkFileLimit(e, h.MaxFileBytes)
 	h.ReceivedReaction = checkReaction(e, "PB_RECEIVED_REACTION", *reaction)
 	h.DeliveredReaction = checkReaction(e, "PB_DELIVERED_REACTION", *delivered)
 	if h.DefaultAgent != "" && !identity.ValidName(h.DefaultAgent) {
@@ -283,7 +366,6 @@ func ParseAgent(args []string, getenv func(string) string) (*Agent, error) {
 	e := &env{get: getenv}
 	a := &Agent{}
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
 	common(fs, e, &a.Common)
 	sd := stateDir(e)
 	fs.StringVar(&a.Name, "name", e.str("PB_NAME", ""), "this agent's name; must match its identity (env PB_NAME)")
@@ -298,8 +380,17 @@ func ParseAgent(args []string, getenv func(string) string) (*Agent, error) {
 	fs.DurationVar(&a.Silence, "silence-limit", e.dur("PB_SILENCE_LIMIT", 0), "no answer from the hub for this long means a new handshake; 0 means 3 x heartbeat (env PB_SILENCE_LIMIT)")
 	fs.DurationVar(&a.ReorderWindow, "reorder-window", e.dur("PB_REORDER_WINDOW", 2*time.Second), "how long a command waits for an earlier one that has not arrived before that one is reported lost (env PB_REORDER_WINDOW)")
 	fs.DurationVar(&a.ReceiptTimeout, "receipt-timeout", e.dur("PB_RECEIPT_TIMEOUT", 30*time.Second), "a spooled message is sent again if not confirmed in this time (env PB_RECEIPT_TIMEOUT)")
-	if err := fs.Parse(args); err != nil {
-		return nil, fmt.Errorf("agent: %w", err)
+	fs.StringVar(&a.Workdir, "workdir", e.str("PB_WORKDIR", ""), "directory Claude Code runs in; auto-heal starts it there (env PB_WORKDIR)")
+	fs.StringVar(&a.InboxDir, "inbox-dir", e.str("PB_INBOX_DIR", ""), "where files from the chat are saved; default: .petrvs-inbox in the workdir, or inbox in the state directory (env PB_INBOX_DIR)")
+	fs.Int64Var(&a.MaxFileBytes, "max-file-bytes", e.int64("PB_MAX_FILE_BYTES"), "largest file in either direction; 0 means 20 MiB, at most 50 MiB (env PB_MAX_FILE_BYTES)")
+	fs.BoolVar(&a.Heal, "heal", e.boolean("PB_HEAL", false), "start Claude Code again when it has stopped or its tmux session is gone; needs the workdir (env PB_HEAL)")
+	fs.StringVar(&a.ClaudeCommand, "claude-command", e.str("PB_CLAUDE_COMMAND", "claude --continue"), "what auto-heal and /continue run to start Claude Code (env PB_CLAUDE_COMMAND)")
+	fs.DurationVar(&a.HealGrace, "heal-grace", e.dur("PB_HEAL_GRACE", 20*time.Second), "Claude Code must be gone this long before auto-heal acts (env PB_HEAL_GRACE)")
+	healTries := fs.Int("heal-tries", int(e.int64("PB_HEAL_TRIES")), "starts allowed within the heal window before auto-heal gives up; 0 means 3 (env PB_HEAL_TRIES)")
+	fs.DurationVar(&a.HealWindow, "heal-window", e.dur("PB_HEAL_WINDOW", 10*time.Minute), "the window the heal tries are counted in (env PB_HEAL_WINDOW)")
+	stuck := fs.String("stuck-after", e.str("PB_STUCK_AFTER", "10m"), "tell the chat when a request has had no reply for this long; 0 or off turns it off (env PB_STUCK_AFTER)")
+	if err := parseFlags(fs, args); err != nil {
+		return nil, err
 	}
 	a.validate(e, !emulator(e))
 	if !identity.ValidName(a.Name) {
@@ -307,6 +398,34 @@ func ParseAgent(args []string, getenv func(string) string) (*Agent, error) {
 	}
 	if a.HubPub == "" {
 		e.err = append(e.err, "hub-pub: set PB_HUB_PUB or -hub-pub")
+	}
+	a.MaxFileBytes = checkFileLimit(e, a.MaxFileBytes)
+	a.StuckAfter = parseOffDuration(e, "PB_STUCK_AFTER", *stuck)
+	a.HealTries = *healTries
+	if a.HealTries == 0 {
+		a.HealTries = 3
+	}
+	if a.HealTries < 0 || a.HealGrace < 0 || a.HealWindow <= 0 {
+		e.err = append(e.err, "heal-tries, heal-grace, heal-window: must not be negative, and the window must be positive")
+	}
+	if a.Workdir != "" && !filepath.IsAbs(a.Workdir) {
+		e.err = append(e.err, "workdir: an absolute path")
+	}
+	if a.InboxDir != "" && !filepath.IsAbs(a.InboxDir) {
+		e.err = append(e.err, "inbox-dir: an absolute path")
+	}
+	if a.InboxDir == "" {
+		if a.Workdir != "" {
+			a.InboxDir = filepath.Join(a.Workdir, ".petrvs-inbox")
+		} else {
+			a.InboxDir = filepath.Join(a.StateDir, "inbox")
+		}
+	}
+	if a.Heal && a.Workdir == "" {
+		e.err = append(e.err, "heal: PB_HEAL needs PB_WORKDIR, the directory to start Claude Code in")
+	}
+	if strings.TrimSpace(a.ClaudeCommand) == "" || strings.ContainsAny(a.ClaudeCommand, "\x00\n\r") {
+		e.err = append(e.err, "claude-command: one line, not empty")
 	}
 	a.SpoolDir = filepath.Join(a.StateDir, "spool")
 	a.LockFile = filepath.Join(a.StateDir, "locked")

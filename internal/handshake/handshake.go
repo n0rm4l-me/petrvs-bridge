@@ -331,6 +331,15 @@ func NewGuardPerSender(max, perSender int) *Guard {
 	return &Guard{seen: map[string]time.Time{}, max: max, perSender: perSender}
 }
 
+// Forget removes the nonce of a hello that Check accepted but that could not be answered, so that the bus delivering the
+// same hello again is not refused as a replay. Only a caller that has just accepted the hello should use it: the nonce
+// was signed by the pinned peer, so forgetting it lets at most that one hello be answered a second time.
+func (g *Guard) Forget(m *Message) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.seen, m.From+"|"+string(m.Nonce))
+}
+
 // Check records the hello's nonce and reports ErrReplay if it was already seen.
 func (g *Guard) Check(m *Message, now time.Time) error {
 	g.mu.Lock()

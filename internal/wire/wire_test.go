@@ -172,3 +172,52 @@ func TestADoneReportTravelsOnlyFromTheAgentToTheHub(t *testing.T) {
 		}
 	}
 }
+
+func TestFileScreenAndStartTypesGoTheirOwnWay(t *testing.T) {
+	ok := func(typ Type, toHub bool) bool {
+		p := &Payload{ID: "x", Type: typ, TS: 1, Exp: 2}
+		return p.Validate(toHub) == nil
+	}
+	for _, typ := range []Type{TypePart, TypeFile} {
+		if !ok(typ, true) || !ok(typ, false) {
+			t.Errorf("%s has to travel both ways", typ)
+		}
+	}
+	for _, typ := range []Type{TypeScreen, TypeStart} {
+		if !ok(typ, false) || ok(typ, true) {
+			t.Errorf("%s goes to the agent only", typ)
+		}
+	}
+}
+
+func TestOnlyWhatChangesTheSessionIsNumbered(t *testing.T) {
+	for typ, want := range map[Type]bool{TypeText: true, TypeKey: true, TypeFile: true, TypeStart: true, TypePart: false, TypeScreen: false, TypeLockdown: false, TypeAlarm: false, TypePing: false, TypeReply: false} {
+		if IsCommand(typ) != want {
+			t.Errorf("IsCommand(%s) = %v, want %v", typ, !want, want)
+		}
+	}
+}
+
+func TestButtonsAreBounded(t *testing.T) {
+	base := func(bs ...Button) *Payload {
+		return &Payload{ID: "x", Type: TypeNotice, TS: 1, Exp: 2, Buttons: bs}
+	}
+	if err := base(Button{Label: "1. Yes", Key: "1", Prompt: "0a1b2c3d"}).Validate(true); err != nil {
+		t.Fatalf("a normal button: %v", err)
+	}
+	many := make([]Button, MaxButtons+1)
+	for i := range many {
+		many[i] = Button{Label: "b", Key: "1"}
+	}
+	for name, p := range map[string]*Payload{
+		"too many":          base(many...),
+		"no label":          base(Button{Key: "1"}),
+		"a label too long":  base(Button{Label: strings.Repeat("x", 41), Key: "1"}),
+		"a key too long":    base(Button{Label: "x", Key: strings.Repeat("k", 17)}),
+		"a prompt too long": base(Button{Label: "x", Key: "1", Prompt: strings.Repeat("p", 17)}),
+	} {
+		if err := p.Validate(true); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}

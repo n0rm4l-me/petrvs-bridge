@@ -21,7 +21,7 @@ func realSession(t *testing.T) (*Tmux, func() string) {
 	if out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-x", "200", "-y", "60", "cat").CombinedOutput(); err != nil {
 		t.Skipf("cannot start tmux here: %v %s", err, out)
 	}
-	t.Cleanup(func() { exec.Command("tmux", "kill-session", "-t", name).Run() })
+	t.Cleanup(func() { exec.Command("tmux", "kill-session", "-t", "="+name).Run() })
 	tm, err := New(name, nil)
 	if err != nil {
 		t.Fatal(err)

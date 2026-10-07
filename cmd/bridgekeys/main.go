@@ -2,8 +2,10 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -26,6 +28,9 @@ func run(args []string) int {
 		return 2
 	}
 	switch args[0] {
+	case "-h", "-help", "--help", "help":
+		fmt.Print(usage)
+		return 0
 	case "gen":
 		return gen(args[1:])
 	case "fingerprint":
@@ -41,12 +46,33 @@ func run(args []string) int {
 
 func fail(err error) int { fmt.Fprintln(os.Stderr, "error:", err); return 1 }
 
+// parse parses the flags of a subcommand. When stop is true the caller returns code at once: a request for help (-h)
+// prints the flags on standard output and is not a failure (0); a mistake prints the error and the flags on standard
+// error (2).
+func parse(fs *flag.FlagSet, args []string) (code int, stop bool) {
+	fs.SetOutput(io.Discard)
+	err := fs.Parse(args)
+	if err == nil {
+		return 0, false
+	}
+	out, code := io.Writer(os.Stderr), 2
+	if errors.Is(err, flag.ErrHelp) {
+		out, code = os.Stdout, 0
+	} else {
+		fmt.Fprintln(os.Stderr, "error:", err)
+	}
+	fs.SetOutput(out)
+	fmt.Fprintf(out, "Usage of %s:\n", fs.Name())
+	fs.PrintDefaults()
+	return code, true
+}
+
 func gen(args []string) int {
 	fs := flag.NewFlagSet("gen", flag.ContinueOnError)
 	name := fs.String("name", "", "party name: lower-case letters, digits, - and _")
 	out := fs.String("out", ".", "directory for the files")
-	if fs.Parse(args) != nil {
-		return 2
+	if code, stop := parse(fs, args); stop {
+		return code
 	}
 	id, err := identity.Generate(*name)
 	if err != nil {
@@ -92,7 +118,10 @@ func fingerprint(args []string) int {
 func totpSecret(args []string) int {
 	fs := flag.NewFlagSet("totp-secret", flag.ContinueOnError)
 	out := fs.String("out", "", "file to create (0600)")
-	if fs.Parse(args) != nil || *out == "" {
+	if code, stop := parse(fs, args); stop {
+		return code
+	}
+	if *out == "" {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}

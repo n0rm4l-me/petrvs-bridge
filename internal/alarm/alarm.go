@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"sync"
 	"time"
@@ -72,7 +73,8 @@ func New(cfg Config) (*Alarm, error) {
 	}
 	a := &Alarm{cfg: cfg, last: map[string]time.Time{}, suppressed: map[string]int{}, errs: map[string]error{}}
 	if cfg.StateFile != "" {
-		if _, err := os.Stat(cfg.StateFile); err == nil {
+		// Fails closed, like the lock: only a file that is certainly absent means disarmed.
+		if _, err := os.Stat(cfg.StateFile); err == nil || !errors.Is(err, fs.ErrNotExist) {
 			a.armed = true
 		}
 	}

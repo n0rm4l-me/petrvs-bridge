@@ -1,6 +1,9 @@
 package config
 
 import (
+	"bytes"
+	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,11 +54,15 @@ func TestHubReportsEveryProblemAtOnce(t *testing.T) {
 func TestTheTokenIsNeverAFlag(t *testing.T) {
 	e := hubEnv()
 	delete(e, "TELEGRAM_BOT_TOKEN")
+	_, stderr := capture(t)
 	if _, err := ParseHub([]string{"-token", "1:secret"}, envOf(e)); err == nil {
 		t.Fatal("a token flag was accepted")
 	}
 	if _, err := ParseHub([]string{"-telegram-bot-token=1:x"}, envOf(e)); err == nil {
 		t.Fatal("a token flag was accepted")
+	}
+	if strings.Contains(stderr.String(), "1:secret") || strings.Contains(stderr.String(), "1:x") {
+		t.Fatalf("the usage echoes the token given on the command line:\n%s", stderr)
 	}
 }
 
@@ -305,5 +312,179 @@ func TestDeliveredReactionDefaultsToAThumbAndIsCheckedLikeTheOther(t *testing.T)
 	e["PB_DELIVERED_REACTION"] = "done"
 	if _, err = ParseHub(nil, envOf(e)); err == nil || !strings.Contains(err.Error(), "PB_DELIVERED_REACTION") {
 		t.Fatalf("%v", err)
+	}
+}
+
+// The Pub/Sub client refuses an empty project even for the emulator, so configuration must never hand it one.
+func TestTheEmulatorGetsAPlaceholderProjectWhenNoneIsSet(t *testing.T) {
+	e := hubEnv()
+	delete(e, "PB_PROJECT")
+	e["PUBSUB_EMULATOR_HOST"] = "127.0.0.1:8085"
+	h, err := ParseHub(nil, envOf(e))
+	if err != nil || h.Project != "emulator" {
+		t.Fatalf("hub: %v %q", err, h.Project)
+	}
+	ae := agentEnv(t)
+	delete(ae, "PB_PROJECT")
+	ae["PUBSUB_EMULATOR_HOST"] = "127.0.0.1:8085"
+	a, err := ParseAgent(nil, envOf(ae))
+	if err != nil || a.Project != "emulator" {
+		t.Fatalf("agent: %v %q", err, a.Project)
+	}
+	// A project that is set is kept, from the variable, from GOOGLE_CLOUD_PROJECT and from the flag.
+	e["PB_PROJECT"] = "demo"
+	if h, err = ParseHub(nil, envOf(e)); err != nil || h.Project != "demo" {
+		t.Fatalf("%v %q", err, h.Project)
+	}
+	delete(e, "PB_PROJECT")
+	e["GOOGLE_CLOUD_PROJECT"] = "fromgoogle"
+	if h, err = ParseHub(nil, envOf(e)); err != nil || h.Project != "fromgoogle" {
+		t.Fatalf("%v %q", err, h.Project)
+	}
+	if a, err = ParseAgent([]string{"-project", "flagged"}, envOf(ae)); err != nil || a.Project != "flagged" {
+		t.Fatalf("%v %q", err, a.Project)
+	}
+	// Without the emulator a missing project is still a configuration problem.
+	delete(e, "GOOGLE_CLOUD_PROJECT")
+	delete(e, "PUBSUB_EMULATOR_HOST")
+	if _, err = ParseHub(nil, envOf(e)); err == nil || !strings.Contains(err.Error(), "project") {
+		t.Fatalf("%v", err)
+	}
+}
+
+// capture replaces the places the usage is written to for the length of a test.
+func capture(t *testing.T) (stdout, stderr *bytes.Buffer) {
+	t.Helper()
+	stdout, stderr = &bytes.Buffer{}, &bytes.Buffer{}
+	oldOut, oldErr := usageOut, usageErr
+	usageOut, usageErr = stdout, stderr
+	t.Cleanup(func() { usageOut, usageErr = oldOut, oldErr })
+	return stdout, stderr
+}
+
+func TestHelpPrintsTheUsageOnStandardOutput(t *testing.T) {
+	for _, flagName := range []string{"-h", "--help", "-help"} {
+		stdout, stderr := capture(t)
+		// Even with nothing configured and a token in the environment: help needs no valid configuration and shows no secret.
+		e := map[string]string{"TELEGRAM_BOT_TOKEN": "1:secret"}
+		_, err := ParseHub([]string{flagName}, envOf(e))
+		if !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("hub %s: %v", flagName, err)
+		}
+		if strings.Contains(err.Error(), "configuration problems") {
+			t.Errorf("hub %s: help reported as a configuration problem: %v", flagName, err)
+		}
+		for _, want := range []string{"Usage of hub", "-agents-dir", "-chat-id", "PB_CHAT_ID", "-telegram-api", `(default "https://api.telegram.org")`} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Errorf("hub %s: the usage lacks %q:\n%s", flagName, want, stdout)
+			}
+		}
+		if stderr.Len() != 0 || strings.Contains(stdout.String(), "1:secret") {
+			t.Errorf("hub %s: stderr %q, or the token in the usage:\n%s", flagName, stderr, stdout)
+		}
+
+		stdout, stderr = capture(t)
+		_, err = ParseAgent([]string{flagName}, envOf(agentEnv(t)))
+		if !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("agent %s: %v", flagName, err)
+		}
+		for _, want := range []string{"Usage of agent", "-tmux-session", "-state-dir", "PB_STATE_DIR"} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Errorf("agent %s: the usage lacks %q:\n%s", flagName, want, stdout)
+			}
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("agent %s: help wrote to stderr: %q", flagName, stderr)
+		}
+	}
+}
+
+func TestAnUnknownFlagShowsTheUsageOnStandardError(t *testing.T) {
+	stdout, stderr := capture(t)
+	_, err := ParseHub([]string{"-frobnicate"}, envOf(hubEnv()))
+	if err == nil || errors.Is(err, flag.ErrHelp) || !strings.Contains(err.Error(), "frobnicate") {
+		t.Fatalf("%v", err)
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "-agents-dir") {
+		t.Errorf("stdout %q, stderr:\n%s", stdout, stderr)
+	}
+	stdout, stderr = capture(t)
+	if _, err = ParseAgent([]string{"-frobnicate"}, envOf(agentEnv(t))); err == nil || errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("%v", err)
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "-tmux-session") {
+		t.Errorf("stdout %q, stderr:\n%s", stdout, stderr)
+	}
+}
+
+func TestFileAndWatchSettingsHaveSafeDefaults(t *testing.T) {
+	a, err := ParseAgent(nil, envOf(agentEnv(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.MaxFileBytes != DefaultMaxFileBytes || a.Heal || a.ClaudeCommand != "claude --continue" || a.HealGrace != 20*time.Second ||
+		a.HealTries != 3 || a.HealWindow != 10*time.Minute || a.StuckAfter != 10*time.Minute || a.Workdir != "" {
+		t.Fatalf("%+v", a)
+	}
+	if a.InboxDir != filepath.Join(a.StateDir, "inbox") {
+		t.Errorf("without a workdir the inbox is in the state directory, got %s", a.InboxDir)
+	}
+	h, err := ParseHub(nil, envOf(hubEnv()))
+	if err != nil || h.MaxFileBytes != DefaultMaxFileBytes {
+		t.Fatalf("hub: %v %+v", err, h)
+	}
+}
+
+func TestTheInboxFollowsTheWorkdirAndEverythingCanBeSet(t *testing.T) {
+	e := agentEnv(t)
+	e["PB_WORKDIR"] = "/work/proj"
+	a, err := ParseAgent(nil, envOf(e))
+	if err != nil || a.InboxDir != "/work/proj/.petrvs-inbox" || a.Workdir != "/work/proj" {
+		t.Fatalf("%v %+v", err, a)
+	}
+	e["PB_INBOX_DIR"] = "/data/in"
+	e["PB_MAX_FILE_BYTES"] = "1048576"
+	e["PB_HEAL"] = "true"
+	e["PB_CLAUDE_COMMAND"] = "claude --permission-mode auto --continue"
+	e["PB_HEAL_GRACE"] = "5s"
+	e["PB_HEAL_TRIES"] = "2"
+	e["PB_HEAL_WINDOW"] = "1m"
+	e["PB_STUCK_AFTER"] = "off"
+	a, err = ParseAgent(nil, envOf(e))
+	if err != nil || a.InboxDir != "/data/in" || a.MaxFileBytes != 1<<20 || !a.Heal || a.ClaudeCommand != "claude --permission-mode auto --continue" ||
+		a.HealGrace != 5*time.Second || a.HealTries != 2 || a.HealWindow != time.Minute || a.StuckAfter != 0 {
+		t.Fatalf("%v %+v", err, a)
+	}
+}
+
+func TestBadFileAndWatchSettingsAreRefused(t *testing.T) {
+	for name, set := range map[string]map[string]string{
+		"heal without a workdir":  {"PB_HEAL": "true"},
+		"relative workdir":        {"PB_WORKDIR": "proj"},
+		"relative inbox":          {"PB_INBOX_DIR": "in"},
+		"negative file limit":     {"PB_MAX_FILE_BYTES": "-1"},
+		"file limit over 50 MiB":  {"PB_MAX_FILE_BYTES": "52428801"},
+		"two-line claude command": {"PB_CLAUDE_COMMAND": "claude\nrm -rf /"},
+		"negative stuck time":     {"PB_STUCK_AFTER": "-1m"},
+		"stuck time nonsense":     {"PB_STUCK_AFTER": "soon"},
+		"negative tries":          {"PB_HEAL_TRIES": "-1"},
+	} {
+		e := agentEnv(t)
+		for k, v := range set {
+			e[k] = v
+		}
+		if _, err := ParseAgent(nil, envOf(e)); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	e := hubEnv()
+	e["PB_MAX_FILE_BYTES"] = "52428801"
+	if _, err := ParseHub(nil, envOf(e)); err == nil {
+		t.Error("a hub file limit over 50 MiB was accepted")
+	}
+	e = agentEnv(t)
+	e["PB_HEAL"], e["PB_WORKDIR"] = "true", "/work"
+	if _, err := ParseAgent(nil, envOf(e)); err != nil {
+		t.Errorf("heal with a workdir: %v", err)
 	}
 }

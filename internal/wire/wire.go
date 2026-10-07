@@ -31,6 +31,21 @@ const (
 	// agent runs them in that order and reports a gap instead of running a later command first.
 	MetaSeq = "n"
 
+	// Meta keys of the file transfer and of the keys pressed from a button (see TypePart, TypeFile, TypeKey).
+	MetaTransfer = "t"      // part, file: id of the transfer, a short token chosen by the sender
+	MetaIndex    = "i"      // part: position of the chunk, from 0
+	MetaParts    = "parts"  // file: how many parts the transfer has
+	MetaName     = "name"   // file: file name, without a directory
+	MetaSize     = "size"   // file: size in bytes
+	MetaSHA      = "sha"    // file: SHA-256 of the whole file, hex
+	MetaKind     = "kind"   // file: "photo" (shown as a picture) or "document"
+	MetaPrompt   = "prompt" // key: hash of the prompt the key answers; the agent presses it only if that prompt is still shown
+	MetaEcho     = "echo"   // key: "mode" asks the agent to report the permission mode after pressing the key
+
+	// MaxChunk is the most file bytes that one part carries. Base64 makes its Body a third longer, still under MaxBody.
+	MaxChunk = 128 << 10
+	// MaxButtons bounds the buttons under one message.
+	MaxButtons = 8
 	// MaxBody bounds the text carried in one payload.
 	MaxBody = 256 << 10
 	// MaxData bounds one bus message.
@@ -43,12 +58,19 @@ type Type string
 const (
 	// hub to agent
 	TypeText     Type = "text"     // text typed into the session
-	TypeKey      Type = "key"      // one key: Enter, Escape, Up, Down, 1..9
+	TypeKey      Type = "key"      // one key: Enter, Escape, Up, Down, Tab, BTab (Shift+Tab), 1..9
 	TypeLockdown Type = "lockdown" // stop acting on text and keys until unlocked locally
 	TypePing     Type = "ping"
-	TypeAlarm    Type = "alarm" // arm or disarm the alarm, or ask for its status: Body is "on", "off [code]" or "status"
-	TypeHBAck    Type = "hback" // the hub saw the heartbeat
-	TypeReceipt  Type = "rcpt"  // the hub took a reply or notice; Body is the payload id
+	TypeAlarm    Type = "alarm"  // arm or disarm the alarm, or ask for its status: Body is "on", "off [code]" or "status"
+	TypeHBAck    Type = "hback"  // the hub saw the heartbeat
+	TypeReceipt  Type = "rcpt"   // the hub took a reply or notice; Body is the payload id
+	TypeScreen   Type = "screen" // send a snapshot of the session's screen (as a notice with buttons)
+	TypeStart    Type = "start"  // start Claude Code in the session if it is not running there; a command, like text
+	// both directions
+	TypePart Type = "part" // one chunk of a file: Body is the chunk in base64; Meta t (transfer) and i (index)
+	// TypeFile ends a transfer: Body is the caption; Meta t, parts, name, size, sha, kind. To the agent it is a command
+	// (numbered, run in order with text and keys): the agent assembles the parts, saves the file and tells the session.
+	TypeFile Type = "file"
 	// agent to hub
 	TypeReady     Type = "ready"   // first message of a session
 	TypeReply     Type = "reply"   // output to show the user
@@ -61,12 +83,32 @@ const (
 )
 
 var (
-	toAgent = map[Type]bool{TypeText: true, TypeKey: true, TypeLockdown: true, TypePing: true, TypeHBAck: true, TypeReceipt: true, TypeAlarm: true}
-	toHub   = map[Type]bool{TypeReady: true, TypeReply: true, TypeNotice: true, TypeHeartbeat: true, TypeDropped: true, TypePong: true, TypeAlert: true, TypeDone: true}
+	toAgent = map[Type]bool{TypeText: true, TypeKey: true, TypeLockdown: true, TypePing: true, TypeHBAck: true, TypeReceipt: true, TypeAlarm: true,
+		TypeScreen: true, TypeStart: true, TypePart: true, TypeFile: true}
+	toHub = map[Type]bool{TypeReady: true, TypeReply: true, TypeNotice: true, TypeHeartbeat: true, TypeDropped: true, TypePong: true, TypeAlert: true, TypeDone: true,
+		TypePart: true, TypeFile: true}
 )
+
+// IsCommand says whether the hub numbers payloads of this type (MetaSeq) and the agent runs them one at a time, in that
+// order: what changes the session the user is working in. Parts are not commands; they only carry bytes.
+func IsCommand(t Type) bool {
+	return t == TypeText || t == TypeKey || t == TypeFile || t == TypeStart
+}
 
 // ErrPayload is returned for a payload that decrypts but is not acceptable.
 var ErrPayload = errors.New("wire: unacceptable payload")
+
+// ButtonScreen is the Key of a button that asks for a snapshot of the screen instead of pressing a key.
+const ButtonScreen = "screen"
+
+// Button is one button under a message. Pressing it makes the hub send Key to the agent as a key press (with Prompt as
+// MetaPrompt when set, so that the key is pressed only if that prompt is still on the screen); the Key ButtonScreen asks
+// for a snapshot of the screen instead.
+type Button struct {
+	Label  string `json:"l"`
+	Key    string `json:"k,omitempty"`
+	Prompt string `json:"p,omitempty"`
+}
 
 // Payload is the content of one message.
 type Payload struct {
@@ -76,6 +118,8 @@ type Payload struct {
 	TS   int64             `json:"ts"`
 	Exp  int64             `json:"exp"`
 	Meta map[string]string `json:"meta,omitempty"`
+	// Buttons may accompany a notice or reply (the hub shows them under the message); the hub decides what a press does.
+	Buttons []Button `json:"buttons,omitempty"`
 }
 
 // Expired reports whether the payload's expiry has passed, allowing for clock skew.
@@ -100,6 +144,13 @@ func (p *Payload) Validate(toHubDirection bool) error {
 		return fmt.Errorf("%w: expiry before timestamp", ErrPayload)
 	case len(p.Meta) > 16:
 		return fmt.Errorf("%w: too many meta entries", ErrPayload)
+	case len(p.Buttons) > MaxButtons:
+		return fmt.Errorf("%w: too many buttons", ErrPayload)
+	}
+	for _, b := range p.Buttons {
+		if b.Label == "" || len(b.Label) > 40 || len(b.Key) > 16 || len(b.Prompt) > 16 {
+			return fmt.Errorf("%w: button", ErrPayload)
+		}
 	}
 	for k, v := range p.Meta {
 		if len(k) > 32 || len(v) > 256 {

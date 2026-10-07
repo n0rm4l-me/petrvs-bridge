@@ -2,6 +2,8 @@
 //
 //	agent [run]                   serve (the default)
 //	agent send [-type T] [TEXT]   queue a reply for the hub to show (TEXT, or standard input); for hooks
+//	agent send-file [-caption T] PATH   queue a file for the hub to upload to the chat
+//	agent prompt                  the Notification hook: queue a notice with the prompt on the screen and its buttons
 //	agent unlock                  lift a lockdown; only this machine can do it
 package main
 
@@ -24,7 +26,9 @@ import (
 	"github.com/n0rm4l-me/petrvs-bridge/internal/approval"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/config"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/screen"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/spool"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/sysinfo"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/tmuxctl"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/transport"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
@@ -56,13 +60,21 @@ func run(args []string, getenv func(string) string, stdin io.Reader) int {
 		return send(args, getenv, stdin)
 	case "unlock":
 		return unlock(args, getenv)
+	case "send-file":
+		return sfSendFile(args, getenv)
+	case "prompt":
+		return prompt(args, getenv, stdin)
 	}
-	fmt.Fprintln(os.Stderr, "usage: agent [run] | send [-type reply|notice|alert] [TEXT] | unlock")
+	fmt.Fprintln(os.Stderr, "usage: agent [run] | send [-type reply|notice|alert] [TEXT] | send-file [-caption TEXT] PATH | prompt | unlock")
 	return 2
 }
 
+// parse reads the settings. When it returns no settings the caller stops with the returned exit code, which is 0 for -h.
 func parse(args []string, getenv func(string) string) (*config.Agent, int) {
 	cfg, err := config.ParseAgent(args, getenv)
+	if errors.Is(err, flag.ErrHelp) {
+		return nil, 0 // the usage is printed by the configuration code
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return nil, 2
@@ -70,25 +82,37 @@ func parse(args []string, getenv func(string) string) (*config.Agent, int) {
 	return cfg, 0
 }
 
+// localEnv is the environment for the commands that touch only the state directory (send, unlock). They run where the
+// agent's full settings may be missing, for example in a Claude Code hook, so what they do not use is faked and the
+// secret file is not read.
+func localEnv(getenv func(string) string) func(string) string {
+	return func(k string) string {
+		switch k {
+		case "PB_NAME":
+			return "x"
+		case "PB_IDENTITY", "PB_HUB_PUB", "PB_PROJECT":
+			return "unused"
+		case "PB_ALARM_SECRET_FILE":
+			return ""
+		}
+		return getenv(k)
+	}
+}
+
 func send(args []string, getenv func(string) string, stdin io.Reader) int {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	typ := fs.String("type", "reply", "reply, notice or alert")
-	if fs.Parse(args) != nil {
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	// Only the state directory is needed to queue a message, so this works without the full configuration.
 	dir := getenv("PB_STATE_DIR")
 	if dir == "" {
-		cfg, code := parse(nil, func(k string) string {
-			if k == "PB_NAME" {
-				return "x"
-			}
-			if k == "PB_IDENTITY" || k == "PB_HUB_PUB" {
-				return "unused"
-			}
-			return getenv(k)
-		})
-		if code != 0 {
+		cfg, code := parse(nil, localEnv(getenv))
+		if cfg == nil {
 			return code
 		}
 		dir = cfg.StateDir
@@ -120,29 +144,27 @@ func send(args []string, getenv func(string) string, stdin io.Reader) int {
 }
 
 func unlock(args []string, getenv func(string) string) int {
-	cfg, code := parse(args, func(k string) string {
-		switch k {
-		case "PB_NAME":
-			return "x"
-		case "PB_IDENTITY", "PB_HUB_PUB":
-			return "unused"
-		}
-		return getenv(k)
-	})
-	if code != 0 {
+	cfg, code := parse(args, localEnv(getenv))
+	if cfg == nil {
 		return code
 	}
-	if err := os.Remove(cfg.LockFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+	err := os.Remove(cfg.LockFile)
+	switch {
+	case err == nil:
+		fmt.Printf("unlocked: removed %s; the agent accepts text and keys again\n", cfg.LockFile)
+		return 0
+	case errors.Is(err, os.ErrNotExist):
+		// Nothing was unlocked: this is not the agent's state directory, or its lock is in memory only.
+		fmt.Fprintf(os.Stderr, "no lock file at %s (is PB_STATE_DIR the agent's?)\n", cfg.LockFile)
+	default:
 		fmt.Fprintln(os.Stderr, "error:", err)
-		return 1
 	}
-	fmt.Println("unlocked: the agent accepts text and keys again")
-	return 0
+	return 1
 }
 
 func serve(args []string, getenv func(string) string) int {
 	cfg, code := parse(args, getenv)
-	if code != 0 {
+	if cfg == nil {
 		return code
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level(cfg.LogLevel)}))
@@ -178,6 +200,13 @@ func serve(args []string, getenv func(string) string) int {
 		log.Error("cannot create the state directory", "dir", cfg.StateDir, "err", err)
 		return 1
 	}
+	// The hash that binds a button to its prompt is keyed, and so is the one that `agent prompt` makes. A key that cannot be
+	// had is not fatal: the hashes stay unkeyed, which the keyed buttons of the hooks do not match, so the agent refuses them.
+	if key, err := screen.LoadKey(cfg.StateDir); err != nil {
+		log.Warn("cannot read or create the prompt key; buttons made by the hooks will be refused until it can", "err", err)
+	} else {
+		screen.SetHashKey(key)
+	}
 	sp, err := spool.Open(cfg.SpoolDir)
 	if err != nil {
 		log.Error("cannot open the spool", "err", err)
@@ -208,11 +237,21 @@ func serve(args []string, getenv func(string) string) int {
 		}
 	}
 	host, _ := os.Hostname()
+	diskPath := cfg.Workdir // the disk the work is done on; the state directory is on the same one when there is no workdir
+	if diskPath == "" {
+		diskPath = cfg.StateDir
+	}
 	acfg := agentsvc.Config{
 		Identity: id, Hub: hub, Transport: tr, Names: names, Exec: ex, Spool: sp, LockFile: cfg.LockFile, Log: log,
 		HeartbeatEvery: cfg.Heartbeat, HandshakeEvery: cfg.Handshake, SilenceLimit: cfg.Silence, ReceiptTimeout: cfg.ReceiptTimeout,
 		ReorderWindow: cfg.ReorderWindow,
 		Info:          func() map[string]string { return map[string]string{"host": host, "os": runtime.GOOS} },
+		Screen:        ex,
+		Ext: agentsvc.Extras{
+			Workdir: cfg.Workdir, InboxDir: cfg.InboxDir, StateDir: cfg.StateDir, MaxFileBytes: cfg.MaxFileBytes, StuckAfter: cfg.StuckAfter,
+			Heal:  agentsvc.Heal{Enabled: cfg.Heal, Command: cfg.ClaudeCommand, Grace: cfg.HealGrace, MaxTries: cfg.HealTries, Window: cfg.HealWindow},
+			Facts: sysinfo.FactsFunc(diskPath),
+		},
 	}
 	if cfg.AlarmEnabled {
 		if sensors := alarm.DefaultSensors(); len(sensors) > 0 {

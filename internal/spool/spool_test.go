@@ -3,6 +3,7 @@ package spool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,10 +76,15 @@ func TestSizeAndCountLimits(t *testing.T) {
 	if err := s.Add(wire.TypeReply, strings.Repeat("x", wire.MaxBody+1)); err == nil {
 		t.Fatal("an oversize body was queued")
 	}
-	for i := 0; i < MaxFiles; i++ {
-		if err := s.Add(wire.TypeReply, "x"); err != nil {
+	// Add syncs each file to disk, which is slow to do a thousand times over; all but the last are written directly.
+	for i := 0; i < MaxFiles-1; i++ {
+		name := filepath.Join(s.dir, fmt.Sprintf("%020d-1.json", i))
+		if err := os.WriteFile(name, []byte(`{"type":"reply","body":"x"}`), 0o600); err != nil {
 			t.Fatalf("%d: %v", i, err)
 		}
+	}
+	if err := s.Add(wire.TypeReply, "x"); err != nil {
+		t.Fatalf("the last place: %v", err)
 	}
 	if err := s.Add(wire.TypeReply, "x"); !errors.Is(err, ErrFull) {
 		t.Fatalf("got %v, want ErrFull", err)

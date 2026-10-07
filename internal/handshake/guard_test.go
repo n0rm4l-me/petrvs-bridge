@@ -52,3 +52,29 @@ func TestOneSenderCannotFillTheGuardForTheOthers(t *testing.T) {
 		t.Fatalf("another sender was locked out: %v", err)
 	}
 }
+
+func TestAHelloThatCouldNotBeAnsweredCanBeForgottenAndAnsweredWhenTheBusDeliversItAgain(t *testing.T) {
+	w := newWorld(t)
+	g := NewGuard(2)
+	_, hello, _ := NewInitiator(w.agent, w.hub.Public(), t0)
+	_, other, _ := NewInitiator(w.agent, w.hub.Public(), t0)
+	if _, _, err := Respond(w.hub, w.agent.Public(), hello, t0, g); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Check(other, t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Respond(w.hub, w.agent.Public(), hello, t0, g); !errors.Is(err, ErrReplay) {
+		t.Fatalf("a hello seen before must be a replay: %v", err)
+	}
+	g.Forget(hello)
+	if _, _, err := Respond(w.hub, w.agent.Public(), hello, t0, g); err != nil {
+		t.Fatalf("the forgotten hello was refused: %v", err)
+	}
+	// only that hello was forgotten, and forgetting one that is not there changes nothing
+	g.Forget(hello)
+	g.Forget(hello)
+	if err := g.Check(other, t0); !errors.Is(err, ErrReplay) {
+		t.Fatalf("another hello was forgotten with it: %v", err)
+	}
+}

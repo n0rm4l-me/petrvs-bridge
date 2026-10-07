@@ -192,8 +192,19 @@ func writeFile(path string, data []byte, mode os.FileMode) error {
 		tmp.Close()
 		return err
 	}
+	if err := tmp.Sync(); err != nil { // without it a power cut can leave the renamed file empty
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	if d, err := os.Open(filepath.Dir(path)); err == nil { // best effort: makes the rename survive a power cut
+		d.Sync()
+		d.Close()
+	}
+	return nil
 }
