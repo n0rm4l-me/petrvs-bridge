@@ -442,3 +442,49 @@ func FuzzDecrypt(f *testing.F) {
 		}
 	})
 }
+
+// Until the responder has sent something, the initiator holds the responder's first ratchet key only as a label: no
+// receiving chain exists. A message under that key was once read with a chain key of all zeros, which anyone can compute
+// from public data (the key is in the plaintext ack), so it opened with the AEAD key of an attacker and ran as a command.
+func TestFreshInitiatorRejectsMessageUnderTheResponderFirstKey(t *testing.T) {
+	var sk [keyLen]byte
+	rand.Read(sk[:])
+	responderKey, err := x25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	init, err := NewInitiator(sk, responderKey.PublicKey().Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ad := []byte("hub|agent|session")
+	var ck [keyLen]byte // the chain key an attacker assumes: all zeros
+	for n := uint32(0); n < 3; n++ {
+		next, mk := kdfCK(ck)
+		ck = next
+		header := make([]byte, headerLen)
+		copy(header, responderKey.PublicKey().Bytes())
+		binary.BigEndian.PutUint32(header[keyLen+4:], n)
+		gcm, nonce := aeadFor(mk)
+		blob := append(header, gcm.Seal(nil, nonce, pad([]byte(`{"type":"text"}`)), joinAD(header, ad))...)
+		if got, err := init.Decrypt(blob, ad); !errors.Is(err, ErrAuth) {
+			t.Fatalf("forged message %d under the responder's first key: plaintext %q, err %v; want ErrAuth", n, got, err)
+		}
+	}
+	// the real conversation is untouched: the responder answers only after it has received something
+	resp := NewResponder(sk, responderKey)
+	first, err := init.Encrypt([]byte("hello"), ad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resp.Decrypt(first, ad); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := resp.Encrypt([]byte("hi"), ad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := init.Decrypt(reply, ad); err != nil || string(got) != "hi" {
+		t.Fatalf("the responder's real reply: %q, %v", got, err)
+	}
+}

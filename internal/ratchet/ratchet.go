@@ -323,6 +323,10 @@ func (s *state) decrypt(blob, ad []byte) ([]byte, error) {
 		}
 		s.rk, s.cks = kdfRK(s.rk, secret2)
 		s.hasCKs = true
+	} else if !s.hasCKr {
+		// The peer's first ratchet key is only a label until it has sent something: no receiving chain exists, and reading
+		// one from an all-zero chain key would let anyone who saw the ack forge a message.
+		return nil, ErrAuth
 	} else if n < s.nr {
 		return nil, ErrReplay
 	}
