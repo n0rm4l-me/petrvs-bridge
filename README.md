@@ -294,7 +294,7 @@ proxy that inspects TLS can hold a long streaming call back and let it out in lu
 `unary` the agent asks with `Pull` calls that each end by themselves or after a 25-second deadline, so a stalled call is given up and made again;
 it keeps the lease of a message while its handler runs, sends the acknowledgements in batches and once more when it stops. This is why it is the
 default of the agent. The price is more requests (about five `Pull` calls a minute when idle, and one `Acknowledge` per batch) and a little
-latency: in one measurement, about 130 ms more on the median of a reply (measured with a probe through the whole path). Choose `stream` if
+latency: in a small sample, in the order of 0.1 to 0.2 s more on the median of a reply, now and then up to 0.8 s more. Choose `stream` if
 your network passes long calls, and your agent will make fewer requests; the hub keeps `stream` because it runs where nothing holds the stream back. A sign that
 the agent should be on `unary`: `session established` in its log every two minutes or so, and many `rejected message` lines with `other session` or
 `ack for unknown hello` (at `PB_LOG_LEVEL=debug`).
