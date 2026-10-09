@@ -32,6 +32,7 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "hub.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       automountServiceAccountToken: false
       enableServiceLinks: false
       {{- with .Values.imagePullSecrets }}
@@ -64,6 +65,10 @@ spec:
             - {name: PB_ALLOW_GROUP_READ, value: "true"}      # the secret volume is group-readable because of fsGroup
             - {name: PB_LOCK_FILE, value: /state/lockdown}    # a file on the state volume: kept across a pod only with state.persistence
             - {name: PB_LOG_LEVEL, value: {{ .Values.hub.logLevel | quote }}}
+            - {name: PB_SHUTDOWN_TIMEOUT, value: {{ .Values.hub.shutdownTimeout | quote }}}
+            {{- if .Values.health.enabled }}
+            - {name: PB_HEALTH_DIR, value: {{ .Values.health.dir | quote }}}
+            {{- end }}
             - {name: PB_RECEIVED_REACTION, value: {{ .Values.hub.receivedReaction | quote }}}
             - {name: PB_DELIVERED_REACTION, value: {{ .Values.hub.deliveredReaction | quote }}}
             - {name: PB_FAILED_REACTION, value: {{ .Values.hub.failedReaction | quote }}}
@@ -90,13 +95,31 @@ spec:
             {{- with .Values.hub.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- if .Values.health.enabled }}
+          startupProbe:
+            exec: {command: ["/hub", "probe", "ready"]}
+            {{- toYaml .Values.health.startup | nindent 12 }}
+          livenessProbe:
+            exec: {command: ["/hub", "probe", "live"]}
+            {{- toYaml .Values.health.liveness | nindent 12 }}
+          readinessProbe:
+            exec: {command: ["/hub", "probe", "ready"]}
+            {{- toYaml .Values.health.readiness | nindent 12 }}
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
             - {name: keys, mountPath: /keys, readOnly: true}
             - {name: agents, mountPath: /agents, readOnly: true}
             - {name: state, mountPath: /state}
+            {{- if .Values.health.enabled }}
+            - {name: health, mountPath: {{ .Values.health.dir | quote }}}
+            {{- end }}
       volumes:
+        {{- if .Values.health.enabled }}
+        - name: health
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+        {{- end }}
         - name: state
           {{- if .Values.state.persistence.enabled }}
           persistentVolumeClaim:

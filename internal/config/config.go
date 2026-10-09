@@ -60,6 +60,11 @@ type Hub struct {
 	FailedReaction string
 	// MaxFileBytes bounds a file in either direction; 0 was replaced by the default (20 MiB).
 	MaxFileBytes int64
+	// HealthDir, if set, is where the hub records that it is alive and ready, for `hub probe` to read (an absolute path; in a
+	// container, a small in-memory volume). Empty means the hub records nothing.
+	HealthDir string
+	// ShutdownTimeout is how long the hub waits, once told to stop, for the work in flight (default 20s).
+	ShutdownTimeout time.Duration
 }
 
 // Agent holds the agent's settings.
@@ -327,6 +332,8 @@ func ParseHub(args []string, getenv func(string) string) (*Hub, error) {
 	fs.DurationVar(&h.PollTimeout, "poll-timeout", e.dur("PB_POLL_TIMEOUT", 25*time.Second), "Telegram long-poll timeout (env PB_POLL_TIMEOUT)")
 	fs.IntVar(&h.MaxReplyBytes, "max-reply-bytes", int(e.int64("PB_MAX_REPLY_BYTES")), "longest reply shown in the chat; 0 means 20000 (env PB_MAX_REPLY_BYTES)")
 	fs.Int64Var(&h.MaxFileBytes, "max-file-bytes", e.int64("PB_MAX_FILE_BYTES"), "largest file in either direction; 0 means 20 MiB, at most 50 MiB (env PB_MAX_FILE_BYTES)")
+	fs.StringVar(&h.HealthDir, "health-dir", e.str("PB_HEALTH_DIR", ""), "directory where the hub records that it is alive and ready, for `hub probe live` and `hub probe ready` to read; empty means it records nothing (env PB_HEALTH_DIR)")
+	fs.DurationVar(&h.ShutdownTimeout, "shutdown-timeout", e.dur("PB_SHUTDOWN_TIMEOUT", 20*time.Second), "how long the hub waits for the work in flight after it was told to stop; keep it shorter than the grace period of the container (env PB_SHUTDOWN_TIMEOUT)")
 	fs.StringVar(&h.LockFile, "lock-file", e.str("PB_LOCK_FILE", ""), "file that keeps a lockdown across restarts of the hub; empty means a restart ends it (env PB_LOCK_FILE)")
 	fs.StringVar(&h.DefaultAgent, "default-agent", e.str("PB_DEFAULT_AGENT", ""), "agent that gets plain text until you choose one; empty means the hub asks first when it has several (env PB_DEFAULT_AGENT)")
 	reaction := fs.String("received-reaction", e.str("PB_RECEIVED_REACTION", "off"), "emoji put on each message of yours once the hub has read it, before the agent has, or off (env PB_RECEIVED_REACTION)")
@@ -344,6 +351,12 @@ func ParseHub(args []string, getenv func(string) string) (*Hub, error) {
 	}
 	if h.UserID == 0 {
 		h.UserID = h.ChatID
+	}
+	if h.HealthDir != "" && !filepath.IsAbs(h.HealthDir) {
+		e.err = append(e.err, "health-dir: an absolute path")
+	}
+	if h.ShutdownTimeout <= 0 || h.ShutdownTimeout > 5*time.Minute {
+		e.err = append(e.err, "shutdown-timeout: more than 0 and at most 5m")
 	}
 	h.validate(e, !emulator(e))
 	checkTelegramBase(e, h.TelegramBase)

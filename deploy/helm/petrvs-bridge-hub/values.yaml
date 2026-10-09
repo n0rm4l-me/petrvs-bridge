@@ -18,6 +18,7 @@ hub:
   # file becomes a float and would be rendered as 1.23456789e+08 (values.schema.json refuses it). With --set use --set-string.
   chatId: ""            # required: the only chat that is obeyed
   userId: ""            # the only user that is obeyed; empty means the chat id
+  shutdownTimeout: "20s" # PB_SHUTDOWN_TIMEOUT: how long the hub waits, once told to stop, for the work in flight; keep terminationGracePeriodSeconds above it
   defaultAgent: ""      # the agent that gets plain text until you choose one; empty: the hub asks first when it has several
   deliveredReaction: "👀" # put on your message once the agent has got it and typed it into its session; "off" for no mark
   failedReaction: "👎"    # put on your message when it did not get through (agent offline, bus refused, agent could not type it); "off" for none
@@ -70,6 +71,24 @@ serviceAccount:
   create: true
   name: ""
   annotations: {}       # on GKE with Workload Identity: iam.gke.io/gcp-service-account: HUB_SA@PROJECT.iam.gserviceaccount.com
+
+# The kubelet gives the pod this long, after SIGTERM, before it kills it. The hub says at once that it is not ready, cancels its work and
+# waits for the handlers in flight, the bus receiver and the last confirmation to Telegram (hub.shutdownTimeout, and 2 s for that
+# confirmation); the rest is room.
+terminationGracePeriodSeconds: 40
+
+# The hub listens on nothing, so its probes are commands, not requests: `/hub probe live` and `/hub probe ready` read two files that the
+# hub touches every 5 s in a small in-memory volume (PB_HEALTH_DIR). Needs an image that has the `probe` command.
+#   live:  the Telegram loop still turns (a failed poll or a wait that Telegram asked for counts; a loop that hangs does not): the kubelet
+#          restarts the container if it fails.
+#   ready: besides, the last poll worked, the bus receiver runs and the hub is not stopping. Nothing routes to the pod, so a failure only
+#          shows in the status of the pod, and a rollout waits for it.
+health:
+  enabled: true
+  dir: /health
+  startup: {periodSeconds: 5, failureThreshold: 24}      # up to two minutes to the first good poll
+  liveness: {periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 3}
+  readiness: {periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 2}
 
 podAnnotations: {}
 podLabels: {}

@@ -243,6 +243,8 @@ unknown flag prints them too, and exits with 2).
 | `PB_TEXT_TTL` | `-text-ttl` | `10m` | How long a text command stays valid |
 | `PB_KEY_TTL` | `-key-ttl` | `1m` | How long a key press or an alarm command stays valid |
 | `PB_POLL_TIMEOUT` | `-poll-timeout` | `25s` | Telegram long-poll timeout |
+| `PB_HEALTH_DIR` | `-health-dir` | unset | Absolute path of a directory where the hub touches two files every 5 s, `live` and `ready`, for `hub probe live` and `hub probe ready` to read (a container's exec probes). Unset, the hub records nothing. No port is opened |
+| `PB_SHUTDOWN_TIMEOUT` | `-shutdown-timeout` | `20s` | After SIGTERM the hub says at once that it is not ready, cancels its work and waits this long for the handlers in flight, the bus receiver and the last confirmation to Telegram; a second signal ends it at once. Keep the container's grace period above it |
 | `PB_MAX_REPLY_BYTES` | `-max-reply-bytes` | `20000` | Longest reply shown in the chat (longer ones are cut, with a note) |
 | `PB_MAX_FILE_BYTES` | `-max-file-bytes` | `20971520` (20 MiB) | Largest file in either direction, at most 50 MiB (Telegram lets a bot download 20 MB) |
 | `PB_DEFAULT_AGENT` | `-default-agent` | unset | Agent that gets plain text until you choose one. Unset with several agents means the hub asks first; with one agent that one is used |

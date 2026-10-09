@@ -155,7 +155,7 @@ The agent sends `ready` as the first message of a session and repeats it every h
 answered anything (the hub answers `ready` with `hback`). The hub starts using a new session when it first hears from
 it, and keeps up to four offered sessions per agent until one of them is proved. The agent sends `hb` every heartbeat
 interval; the hub answers `hback`. An agent that hears nothing from the hub for the
-silence limit starts a new handshake (this is how a hub restart is healed). The hub calls an agent offline after a period
+silence limit starts a new handshake (this is how a hub restart is healed). A subscription call that fails (a token that could not be refreshed because the laptop was asleep or off the network, a stream that was reset) is not the end of the agent: it logs a warning, waits (1 s, doubling to a minute, starting over after a stretch that went well) and reads again. The hub calls an agent offline after a period
 without any authenticated message and says so once (again later if the chat was down at that moment). The next
 authenticated message of any type from an offline agent is answered with "is back" ("connected" for `ready`).
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/n0rm4l-me/petrvs-bridge/internal/config"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/health"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/hubsvc"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/telegram"
@@ -37,6 +38,9 @@ func level(s string) slog.Level {
 }
 
 func run(args []string, getenv func(string) string) int {
+	if len(args) > 0 && args[0] == "probe" {
+		return probe(args[1:], getenv, time.Now(), os.Stderr)
+	}
 	cfg, err := config.ParseHub(args, getenv)
 	if errors.Is(err, flag.ErrHelp) {
 		return 0 // the usage has been printed on standard output
@@ -77,6 +81,8 @@ func run(args []string, getenv func(string) string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// After the first signal the hub drains (see hubsvc.Run); a second one ends it at once, as it would without this handler.
+	go func() { <-ctx.Done(); stop() }()
 	tr, err := transport.NewPubSub(ctx, cfg.Project)
 	if err != nil {
 		log.Error("cannot connect to Pub/Sub", "err", err)
@@ -90,12 +96,21 @@ func run(args []string, getenv func(string) string) int {
 			return 1
 		}
 	}
+	var beacon hubsvc.Health
+	if cfg.HealthDir != "" {
+		b, err := health.NewBeacon(cfg.HealthDir)
+		if err != nil {
+			log.Error("cannot use the health directory", "dir", cfg.HealthDir, "err", err)
+			return 1
+		}
+		beacon = b
+	}
 	hub, err := hubsvc.New(hubsvc.Config{
 		Identity: id, Agents: agents, Transport: tr, Names: names,
 		Telegram: telegram.NewHTTP(cfg.Token).WithBaseURL(cfg.TelegramBase), ChatID: cfg.ChatID, UserID: cfg.UserID, Log: log,
 		OfflineAfter: cfg.OfflineAfter, TextTTL: cfg.TextTTL, KeyTTL: cfg.KeyTTL, PollTimeout: cfg.PollTimeout, MaxReplyBytes: cfg.MaxReplyBytes,
 		LockFile: cfg.LockFile, ReceivedReaction: cfg.ReceivedReaction, DeliveredReaction: cfg.DeliveredReaction, FailedReaction: cfg.FailedReaction, DefaultAgent: cfg.DefaultAgent,
-		MaxFileBytes: cfg.MaxFileBytes,
+		MaxFileBytes: cfg.MaxFileBytes, Health: beacon, ShutdownTimeout: cfg.ShutdownTimeout,
 	})
 	if err != nil {
 		log.Error("invalid hub configuration", "err", err)

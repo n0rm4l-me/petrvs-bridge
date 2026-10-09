@@ -196,7 +196,7 @@ func (h *Hub) onMedia(ctx context.Context, u telegram.Update) {
 		h.sayAs(ctx, agent, "⚠️ Too many messages are waiting for the file that is still on its way to "+agent+". This file was not sent; send it again in a moment.")
 		return
 	}
-	go func() {
+	h.goBg(func() {
 		defer h.down.finish()
 		// The deferred calls run in the reverse order, also when the transfer panics: the place in line is given up if the
 		// closing command did not take it, and then the messages that waited behind the file are sent.
@@ -208,7 +208,7 @@ func (h *Hub) onMedia(ctx context.Context, u telegram.Update) {
 			}
 		}()
 		h.transferFile(ctx, fetcher, agent, u, limit, res)
-	}()
+	})
 }
 
 // cannotTake says why an agent cannot take a file now, or "" when it can: not connected, reconnecting, offline, or locked

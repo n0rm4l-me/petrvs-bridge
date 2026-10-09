@@ -60,9 +60,13 @@ type Config struct {
 
 	HeartbeatEvery time.Duration // default 30s
 	HandshakeEvery time.Duration // default 10s
-	SilenceLimit   time.Duration // default 3 x HeartbeatEvery: no hub answer for this long means re-handshake
-	SpoolEvery     time.Duration // default 2s
-	SkewAllowance  time.Duration // default 30s
+	// ReceiveRetry is the first wait before the agent reads its subscription again after the bus failed it (default 1s, doubling
+	// up to a minute). A laptop sleeps and changes networks: a token that could not be refreshed, a stream that was reset, a
+	// name that did not resolve are not the end of the agent, and nothing restarts it.
+	ReceiveRetry  time.Duration
+	SilenceLimit  time.Duration // default 3 x HeartbeatEvery: no hub answer for this long means re-handshake
+	SpoolEvery    time.Duration // default 2s
+	SkewAllowance time.Duration // default 30s
 	// Alarm, if set, is armed and disarmed from the chat and reports touches of this machine.
 	Alarm *alarm.Alarm
 	// AlarmCode, if set, is required to disarm the alarm: "/alarm off 123456" with a current one-time code.
@@ -180,6 +184,7 @@ func New(cfg Config) (*Agent, error) {
 	}
 	def(&cfg.HeartbeatEvery, 30*time.Second)
 	def(&cfg.HandshakeEvery, 10*time.Second)
+	def(&cfg.ReceiveRetry, time.Second)
 	def(&cfg.SilenceLimit, 3*cfg.HeartbeatEvery)
 	def(&cfg.SpoolEvery, 2*time.Second)
 	def(&cfg.SkewAllowance, 30*time.Second)
@@ -258,7 +263,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}
 	errc := make(chan error, 1)
-	go func() { errc <- a.cfg.Transport.Receive(ctx, a.cfg.Names.AgentSub(a.cfg.Identity.Name), a.handle) }()
+	go func() { errc <- a.receive(ctx) }()
 	go a.loop(ctx, a.cfg.HandshakeEvery, true, a.handshakeTick)
 	go a.loop(ctx, a.cfg.HeartbeatEvery, false, a.heartbeatTick)
 	go a.executor(ctx)
@@ -286,6 +291,32 @@ func (a *Agent) Run(ctx context.Context) error {
 		return nil
 	case err := <-errc:
 		return err
+	}
+}
+
+// receive reads the agent's subscription until ctx ends. When the bus fails it (the subscription call returns an error), it
+// says so, waits and reads again, with growing waits that start over after a stretch that went well. It returns only when ctx
+// is done; it never ends the agent over a failure that the next try may not have.
+func (a *Agent) receive(ctx context.Context) error {
+	wait := a.cfg.ReceiveRetry
+	for {
+		began := time.Now()
+		err := a.cfg.Transport.Receive(ctx, a.cfg.Names.AgentSub(a.cfg.Identity.Name), a.handle)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if time.Since(began) > time.Minute {
+			wait = a.cfg.ReceiveRetry // it worked for a while: the next failure is a new one
+		}
+		a.log.Warn("reading the subscription failed, trying again", "err", err, "retry_in", wait)
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return nil
+		}
+		if wait < time.Minute {
+			wait *= 2
+		}
 	}
 }
 

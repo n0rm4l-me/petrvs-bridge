@@ -488,3 +488,31 @@ func TestBadFileAndWatchSettingsAreRefused(t *testing.T) {
 		t.Errorf("heal with a workdir: %v", err)
 	}
 }
+
+func TestHubHealthAndShutdownSettings(t *testing.T) {
+	e := hubEnv()
+	h, err := ParseHub(nil, envOf(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.HealthDir != "" || h.ShutdownTimeout != 20*time.Second {
+		t.Fatalf("defaults: %q %v", h.HealthDir, h.ShutdownTimeout)
+	}
+	e["PB_HEALTH_DIR"], e["PB_SHUTDOWN_TIMEOUT"] = "/health", "25s"
+	h, err = ParseHub(nil, envOf(e))
+	if err != nil || h.HealthDir != "/health" || h.ShutdownTimeout != 25*time.Second {
+		t.Fatalf("%v %+v", err, h)
+	}
+	for k, v := range map[string]string{"PB_HEALTH_DIR": "relative/dir", "PB_SHUTDOWN_TIMEOUT": "0s"} {
+		bad := hubEnv()
+		bad[k] = v
+		if _, err := ParseHub(nil, envOf(bad)); err == nil {
+			t.Errorf("%s=%q was accepted", k, v)
+		}
+	}
+	long := hubEnv()
+	long["PB_SHUTDOWN_TIMEOUT"] = "6m"
+	if _, err := ParseHub(nil, envOf(long)); err == nil {
+		t.Error("a shutdown timeout above five minutes was accepted")
+	}
+}

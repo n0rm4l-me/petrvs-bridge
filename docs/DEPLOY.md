@@ -104,6 +104,15 @@ When the hub is stopped (an upgrade, a drain) it makes one last Telegram call of
 
 Only one replica may run. The chart fixes that, because two hubs would fight over one bot.
 
+**Probes and shutdown.** The hub listens on nothing, so the chart's startup, liveness and readiness probes are commands: `/hub probe ready`
+and `/hub probe live` read two files that the hub touches every 5 s in a small in-memory volume (`PB_HEALTH_DIR`, `health.dir`). *Live* means the
+Telegram loop still turns: a failed poll, or a wait that Telegram asked for, counts as alive (a restart would not help), a loop that hangs does not.
+*Ready* adds that the last poll worked, the bus receiver runs and the hub is not stopping. Nothing routes to the pod, so a failed readiness shows in its
+status and holds a rollout back, nothing more. After SIGTERM the hub says at once that it is not ready, cancels its work and waits up to
+`PB_SHUTDOWN_TIMEOUT` (`hub.shutdownTimeout`, 20 s) for the handlers in flight, the bus receiver and the last confirmation to Telegram;
+`terminationGracePeriodSeconds` (40 s) is above that. The probes need an image that has the `probe` command (this one and later); set
+`health.enabled: false` for an older image.
+
 **The lockdown does not survive a new pod.** The hub keeps `/lockdown` in a file (`PB_LOCK_FILE`), and the chart puts
 that file on an `emptyDir`. An `emptyDir` survives a restart of the container but not a replacement of the pod, and a
 `helm upgrade` that changes the pod (a new image, a changed `agents.files`), a node drain and an eviction all replace

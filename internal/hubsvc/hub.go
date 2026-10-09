@@ -32,6 +32,14 @@ import (
 	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
 )
 
+// Health receives what the hub knows about itself, for a probe of the container runtime to read (see internal/health).
+type Health interface {
+	// Alive records that the hub's loops still make progress.
+	Alive() error
+	// Ready records whether the hub is doing its work now (false while it starts, is cut off from Telegram or the bus, or drains).
+	Ready(ok bool) error
+}
+
 // Config holds everything a hub needs.
 type Config struct {
 	Identity  *identity.Identity
@@ -51,6 +59,16 @@ type Config struct {
 	HelloMinInterval time.Duration // default 3s per agent
 	PollTimeout      time.Duration // default 25s
 	MenuRetry        time.Duration // first wait before publishing the command menu again after a failure, default 5s
+	// Health, if set, is told every HealthEvery (default 5s) whether the hub is alive and ready. Alive means the Telegram loop
+	// still polls (a poll that fails, or a wait that Telegram asked for, counts: restarting would not help); Ready means that,
+	// besides, the last poll worked, the bus receiver runs and the hub is not draining.
+	Health      Health
+	HealthEvery time.Duration
+	// HealthSlack is the room the health windows leave on top of the long poll (default 15s); tests make it small.
+	HealthSlack time.Duration
+	// ShutdownTimeout bounds how long Run waits, after it was asked to stop, for the handlers in flight, the bus receiver and
+	// the last confirmation to Telegram (default 20s). It should be shorter than the grace period of the container.
+	ShutdownTimeout time.Duration
 	// MaxFileBytes bounds a file in either direction (default filetx.DefaultMaxBytes).
 	MaxFileBytes int64
 	// MinTurn is the least time between two batches of parts of a file sent to one agent (default 250ms): the agent's
@@ -114,6 +132,12 @@ type Hub struct {
 	log   *slog.Logger
 	guard *handshake.Guard
 
+	// Health signals (see healthLoop): unix nanoseconds of the last turn of the Telegram loop and of the last poll that worked, whether the
+	// bus receiver runs, whether the hub was asked to stop, and the goroutines that Run waits for when it stops.
+	lastPoll, lastPollOK atomic.Int64
+	busUp, draining      atomic.Bool
+	bg                   sync.WaitGroup
+
 	mu     sync.Mutex
 	agents map[string]*agentState
 	active string
@@ -172,6 +196,9 @@ func New(cfg Config) (*Hub, error) {
 	def(&cfg.HelloMinInterval, 3*time.Second)
 	def(&cfg.PollTimeout, 25*time.Second)
 	def(&cfg.MenuRetry, 5*time.Second)
+	def(&cfg.HealthEvery, 5*time.Second)
+	def(&cfg.HealthSlack, 15*time.Second)
+	def(&cfg.ShutdownTimeout, 20*time.Second)
 	def(&cfg.LockdownResend, 10*time.Second)
 	if cfg.MaxReplyBytes <= 0 {
 		cfg.MaxReplyBytes = 20000
@@ -243,27 +270,96 @@ func (st *agentState) reconnecting(now time.Time) bool {
 	return len(st.pending) > 0 && now.Sub(st.lastHello) < 15*time.Second
 }
 
-// Run serves until ctx ends.
+// Run serves until ctx ends. It then stops in order: it says at once that it is not ready, cancels the work, and waits (at most
+// ShutdownTimeout) for the handlers in flight, for the bus receiver to return, and for the chat loop to tell Telegram how far it
+// read, so that a hub started right after this one does not get the same updates again.
 func (h *Hub) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	now := h.cfg.Now().UnixNano()
+	h.lastPoll.Store(now) // the first poll has the liveness window to complete
 	errc := make(chan error, 1)
-	go func() { errc <- h.cfg.Transport.Receive(ctx, h.cfg.Names.HubSub(), h.onBus) }()
-	go h.publishMenu(ctx)
+	h.goBg(func() {
+		h.busUp.Store(true)
+		err := h.cfg.Transport.Receive(ctx, h.cfg.Names.HubSub(), h.onBus)
+		h.busUp.Store(false)
+		errc <- err
+	})
+	h.goBg(func() { h.publishMenu(ctx) })
 	if h.reactQ != nil {
-		go h.markLoop(ctx)
+		h.goBg(func() { h.markLoop(ctx) })
 	}
-	loopDone := make(chan struct{})
-	go func() { h.telegramLoop(ctx); close(loopDone) }()
-	go h.watchLoop(ctx)
-	// Run returns only after the chat loop has told Telegram how far it read, so that a hub started right after this one
-	// does not get the same updates again.
-	defer func() { cancel(); <-loopDone }()
+	h.goBg(func() { h.telegramLoop(ctx) })
+	h.goBg(func() { h.watchLoop(ctx) })
+	h.goBg(func() { h.healthLoop(ctx) })
+	var result error
 	select {
 	case <-ctx.Done():
-		return nil
-	case err := <-errc:
-		return err
+	case result = <-errc:
+	}
+	h.log.Info("hub stopping", "waiting_at_most", h.cfg.ShutdownTimeout)
+	h.draining.Store(true)
+	h.reportHealth() // not ready from this moment on, before the work is cancelled
+	cancel()
+	done := make(chan struct{})
+	go func() { h.bg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(h.cfg.ShutdownTimeout):
+		h.log.Warn("some work did not stop in time and is abandoned", "after", h.cfg.ShutdownTimeout)
+	}
+	return result
+}
+
+// goBg runs f in a goroutine that Run waits for when it stops.
+func (h *Hub) goBg(f func()) {
+	h.bg.Add(1)
+	go func() {
+		defer h.bg.Done()
+		f()
+	}()
+}
+
+// healthLoop tells the Health sink, every HealthEvery, what reportHealth finds.
+func (h *Hub) healthLoop(ctx context.Context) {
+	if h.cfg.Health == nil {
+		return
+	}
+	h.reportHealth()
+	t := time.NewTicker(h.cfg.HealthEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			h.reportHealth()
+		}
+	}
+}
+
+// liveWindow is how long the Telegram loop may go without a turn before the hub counts as stuck: a long poll, a few failed
+// polls with their waits, and some room.
+func (h *Hub) liveWindow() time.Duration { return 3*h.cfg.PollTimeout + 3*h.cfg.HealthSlack }
+
+// readyWindow is how long a successful poll counts as recent.
+func (h *Hub) readyWindow() time.Duration { return 2*h.cfg.PollTimeout + h.cfg.HealthSlack }
+
+// reportHealth tells the Health sink whether the hub is alive and ready now.
+func (h *Hub) reportHealth() {
+	if h.cfg.Health == nil {
+		return
+	}
+	now := h.cfg.Now()
+	alive := now.Sub(time.Unix(0, h.lastPoll.Load())) < h.liveWindow()
+	ready := !h.draining.Load() && h.busUp.Load() && h.lastPollOK.Load() != 0 && now.Sub(time.Unix(0, h.lastPollOK.Load())) < h.readyWindow()
+	if alive {
+		if err := h.cfg.Health.Alive(); err != nil {
+			h.log.Warn("could not record that the hub is alive", "err", err)
+		}
+	}
+	if err := h.cfg.Health.Ready(ready); err != nil {
+		h.log.Warn("could not record whether the hub is ready", "err", err)
 	}
 }
 
@@ -530,6 +626,7 @@ func (h *Hub) telegramLoop(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		ups, err := h.cfg.Telegram.GetUpdates(ctx, offset, h.cfg.PollTimeout)
+		h.lastPoll.Store(h.cfg.Now().UnixNano())
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -539,6 +636,8 @@ func (h *Hub) telegramLoop(ctx context.Context) {
 			if errors.As(err, &rl) && rl.After > wait {
 				wait = rl.After // Telegram said how long to stay away
 			}
+			// The loop is waiting on purpose: it counts as alive until the wait is over (restarting would not shorten it).
+			h.lastPoll.Store(h.cfg.Now().Add(wait).UnixNano())
 			h.log.Warn("polling failed", "err", err, "retry_in", wait)
 			select {
 			case <-time.After(wait):
@@ -551,6 +650,7 @@ func (h *Hub) telegramLoop(ctx context.Context) {
 			continue
 		}
 		backoff = time.Second
+		h.lastPollOK.Store(h.cfg.Now().UnixNano())
 		for _, u := range ups {
 			if ctx.Err() != nil {
 				return // not started, so not confirmed: the next process handles it
