@@ -30,6 +30,10 @@ type Common struct {
 	// AllowGroupRead lets private files (identity, secrets) be readable by their group, for example a Kubernetes
 	// secret volume with fsGroup. Other users still may not read them.
 	AllowGroupRead bool
+	// Pull is how the subscription is read: "stream" (one long streaming call, the default) or "unary" (short calls, each
+	// with a deadline). A tunnel or a TLS-inspecting proxy between this machine and Google can hold a long stream back and
+	// let it out in lumps; short calls pass it.
+	Pull string
 }
 
 // Hub holds the hub's settings.
@@ -215,6 +219,7 @@ func common(fs *flag.FlagSet, e *env, c *Common) {
 	fs.StringVar(&c.Identity, "identity", e.str("PB_IDENTITY", ""), "path of the private identity file (env PB_IDENTITY)")
 	fs.StringVar(&c.LogLevel, "log-level", e.str("PB_LOG_LEVEL", "info"), "debug, info, warn or error (env PB_LOG_LEVEL)")
 	fs.BoolVar(&c.CreateResources, "create-resources", e.boolean("PB_CREATE_RESOURCES", false), "create topics and subscriptions; development and the emulator only (env PB_CREATE_RESOURCES)")
+	fs.StringVar(&c.Pull, "pull", e.str("PB_PULL", "stream"), "how the subscription is read: stream, or unary for a network that holds a long stream back (env PB_PULL)")
 	fs.BoolVar(&c.AllowGroupRead, "allow-group-read", e.boolean("PB_ALLOW_GROUP_READ", false), "accept private files that their group may read, for a Kubernetes secret volume with fsGroup (env PB_ALLOW_GROUP_READ)")
 }
 
@@ -277,6 +282,11 @@ func (c *Common) validate(e *env, needProject bool) {
 	case "debug", "info", "warn", "error":
 	default:
 		e.err = append(e.err, "log-level: debug, info, warn or error")
+	}
+	switch c.Pull {
+	case "stream", "unary":
+	default:
+		e.err = append(e.err, "pull: stream or unary")
 	}
 }
 

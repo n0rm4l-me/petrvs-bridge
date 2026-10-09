@@ -220,6 +220,7 @@ func serve(args []string, getenv func(string) string) int {
 		return 1
 	}
 	defer tr.Close()
+	tr.SetPullMode(transport.PullMode(cfg.Pull))
 	names := wire.Names{Prefix: cfg.Prefix}
 	if cfg.CreateResources {
 		for _, f := range []func() error{
@@ -281,7 +282,7 @@ func serve(args []string, getenv func(string) string) int {
 		log.Error("invalid agent configuration", "err", err)
 		return 1
 	}
-	log.Info("agent running", "tmux_session", cfg.TmuxSession)
+	log.Info("agent running", "tmux_session", cfg.TmuxSession, "pull", cfg.Pull)
 	if err := ag.Run(ctx); err != nil {
 		log.Error("agent stopped", "err", err)
 		return 1

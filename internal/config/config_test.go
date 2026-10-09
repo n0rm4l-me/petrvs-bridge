@@ -103,11 +103,12 @@ func TestBadValuesAreRejectedWithTheirNames(t *testing.T) {
 	e["PB_CREATE_RESOURCES"] = "maybe"
 	e["PB_LOG_LEVEL"] = "loud"
 	e["PB_PREFIX"] = "Bad Prefix"
+	e["PB_PULL"] = "push"
 	_, err := ParseHub(nil, envOf(e))
 	if err == nil {
 		t.Fatal("accepted")
 	}
-	for _, want := range []string{"PB_OFFLINE_AFTER", "PB_KEY_TTL", "PB_CHAT_ID", "PB_CREATE_RESOURCES", "log-level", "prefix"} {
+	for _, want := range []string{"PB_OFFLINE_AFTER", "PB_KEY_TTL", "PB_CHAT_ID", "PB_CREATE_RESOURCES", "log-level", "prefix", "pull"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in:\n%v", want, err)
 		}
@@ -514,5 +515,18 @@ func TestHubHealthAndShutdownSettings(t *testing.T) {
 	long["PB_SHUTDOWN_TIMEOUT"] = "6m"
 	if _, err := ParseHub(nil, envOf(long)); err == nil {
 		t.Error("a shutdown timeout above five minutes was accepted")
+	}
+}
+
+func TestPullDefaultsToTheStreamAndAcceptsUnary(t *testing.T) {
+	h, err := ParseHub(nil, envOf(hubEnv()))
+	if err != nil || h.Pull != "stream" {
+		t.Fatalf("%v %+v", err, h)
+	}
+	e := agentEnv(t)
+	e["PB_PULL"] = "unary"
+	a, err := ParseAgent(nil, envOf(e))
+	if err != nil || a.Pull != "unary" {
+		t.Fatalf("%v %+v", err, a)
 	}
 }

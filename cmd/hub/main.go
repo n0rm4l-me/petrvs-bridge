@@ -89,6 +89,7 @@ func run(args []string, getenv func(string) string) int {
 		return 1
 	}
 	defer tr.Close()
+	tr.SetPullMode(transport.PullMode(cfg.Pull))
 	names := wire.Names{Prefix: cfg.Prefix}
 	if cfg.CreateResources {
 		if err := ensure(ctx, tr, names, agents); err != nil {

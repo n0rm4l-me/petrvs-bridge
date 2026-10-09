@@ -253,6 +253,7 @@ unknown flag prints them too, and exits with 2).
 | `PB_RECEIVED_REACTION` | `-received-reaction` | `off` | An early mark the hub puts on each of your messages as soon as it has read it, before the agent has; `off` (the default) for none. Telegram accepts only a fixed set of reaction emoji (see `ReactionTypeEmoji` in the Bot API documentation, for example 👀 👍 🔥 🎉 🫡 🤝 ⚡); if it refuses yours the hub says so once in its log and stops marking |
 | `PB_LOCK_FILE` | `-lock-file` | unset | File that keeps the hub's lockdown across restarts of the process. Unset, a restart forgets a lockdown. In Kubernetes the chart puts it on an `emptyDir`, which is forgotten when the pod is replaced (see Limitations) |
 | `PB_ALLOW_GROUP_READ` | `-allow-group-read` | `false` | Also accept private files that are group-readable (0640), for a Kubernetes secret volume with `fsGroup`. Never world-readable |
+| `PB_PULL` | `-pull` | `stream` | How the subscription is read. `stream` keeps one streaming call open. `unary` asks with short calls that each have a deadline: use it when the network between the machine and Google (a tunnel, a TLS-inspecting proxy) holds a long stream back and lets it out in lumps, which shows as a new handshake every two minutes and heartbeats that arrive late and together |
 | `PB_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error`. Logs never contain message text or tokens. Both programs write JSON lines; the hub names the fields `severity` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) and `message`, which is what Cloud Logging on GKE reads, and the agent `level` and `msg` |
 | `PUBSUB_EMULATOR_HOST` | none | unset | Use the emulator instead of the real service |
 | `GOOGLE_APPLICATION_CREDENTIALS` | none | | Standard Google credentials (or workload identity, or the metadata server) |
@@ -285,6 +286,7 @@ unknown flag prints them too, and exits with 2).
 | `PB_HEAL_TRIES`, `PB_HEAL_WINDOW` | `-heal-tries`, `-heal-window` | `3`, `10m` | Starts allowed within the window before auto-heal gives up |
 | `PB_STUCK_AFTER` | `-stuck-after` | `10m` | Tell the chat when a request has had no reply for this long; `0` or `off` turns it off |
 | `PB_ALLOW_GROUP_READ` | `-allow-group-read` | `false` | As for the hub |
+| `PB_PULL` | `-pull` | `stream` | As for the hub |
 | `GOOGLE_APPLICATION_CREDENTIALS`, `PUBSUB_EMULATOR_HOST` | | | As for the hub |
 
 Other agent commands: `agent send [-type reply|notice|alert] [TEXT | -]` queues a message for the hub (reads standard

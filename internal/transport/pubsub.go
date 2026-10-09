@@ -16,6 +16,7 @@ import (
 type PubSub struct {
 	client  *pubsub.Client
 	project string
+	pull    PullMode // how Receive reads; the zero value is the stream
 
 	mu   sync.Mutex
 	pubs map[string]*pubsub.Publisher
@@ -50,6 +51,9 @@ func (p *PubSub) Publish(ctx context.Context, topic string, data []byte, attrs m
 
 // Receive delivers messages from the subscription to handler until ctx ends.
 func (p *PubSub) Receive(ctx context.Context, subscription string, handler func(context.Context, *Message)) error {
+	if p.pull == PullUnary {
+		return p.receiveUnary(ctx, subscription, handler)
+	}
 	s := p.client.Subscriber(subscription)
 	// Bound what a flood on the topic can make this process hold and work on at once.
 	s.ReceiveSettings.MaxOutstandingMessages = 32
