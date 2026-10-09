@@ -97,7 +97,7 @@ spec:
             {{- end }}
           {{- if .Values.health.enabled }}
           startupProbe:
-            exec: {command: ["/hub", "probe", "ready"]}
+            exec: {command: ["/hub", "probe", "live"]}
             {{- toYaml .Values.health.startup | nindent 12 }}
           livenessProbe:
             exec: {command: ["/hub", "probe", "live"]}

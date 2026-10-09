@@ -104,8 +104,8 @@ When the hub is stopped (an upgrade, a drain) it makes one last Telegram call of
 
 Only one replica may run. The chart fixes that, because two hubs would fight over one bot.
 
-**Probes and shutdown.** The hub listens on nothing, so the chart's startup, liveness and readiness probes are commands: `/hub probe ready`
-and `/hub probe live` read two files that the hub touches every 5 s in a small in-memory volume (`PB_HEALTH_DIR`, `health.dir`). *Live* means the
+**Probes and shutdown.** The hub listens on nothing, so the chart's startup, liveness and readiness probes are commands: `/hub probe live`
+(startup and liveness) and `/hub probe ready` (readiness) read two files that the hub touches every 5 s in a small in-memory volume (`PB_HEALTH_DIR`, `health.dir`). *Live* means the
 Telegram loop still turns: a failed poll, or a wait that Telegram asked for, counts as alive (a restart would not help), a loop that hangs does not.
 *Ready* adds that the last poll worked, the bus receiver runs and the hub is not stopping. Nothing routes to the pod, so a failed readiness shows in its
 status and holds a rollout back, nothing more. After SIGTERM the hub says at once that it is not ready, cancels its work and waits up to

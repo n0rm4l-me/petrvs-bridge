@@ -86,7 +86,7 @@ terminationGracePeriodSeconds: 40
 health:
   enabled: true
   dir: /health
-  startup: {periodSeconds: 5, failureThreshold: 24}      # up to two minutes to the first good poll
+  startup: {periodSeconds: 5, failureThreshold: 24}      # up to two minutes to the first beat (it uses the live check: an outage of Telegram or the bus at start must not make the kubelet restart the hub)
   liveness: {periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 3}
   readiness: {periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 2}
 
