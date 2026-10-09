@@ -1,0 +1,17 @@
+{{- if .Values.state.persistence.enabled }}
+# The hub's lockdown file (a few bytes) outlives a pod: an eviction, a node drain or an upgrade does not unlock the bridge.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "hub.fullname" . }}-state
+  labels:
+    {{- include "hub.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.state.persistence.size }}
+  {{- with .Values.state.persistence.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}

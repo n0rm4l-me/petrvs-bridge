@@ -5,7 +5,7 @@
 image:
   repository: ""        # for example REGION-docker.pkg.dev/PROJECT/REPOSITORY/petrvs-bridge-hub
   digest: ""            # sha256:..., preferred: an immutable reference
-  tag: ""               # used when no digest is given
+  tag: ""               # used when no digest is given; there is no default, and latest, local and dev are refused
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
@@ -28,19 +28,34 @@ hub:
   keyTTL: ""            # 1m by default
   maxReplyBytes: ""
   extraEnv: []          # more environment variables, in the Kubernetes {name, value} form
-  # The hub's lockdown (/lockdown) is kept in a file on an emptyDir. That survives a restart of the container but NOT a new
-  # pod: a helm upgrade that changes the pod (a new image, a changed agent list), a node drain or an eviction makes one,
-  # and with the Recreate strategy the new hub always starts unlocked, without saying so in the chat. To keep the lockdown
-  # across pods, mount a small PersistentVolumeClaim at /state instead of the emptyDir (templates/deployment.yaml, volume
-  # "state"; see docs/DEPLOY.md).
+
+# Where the hub keeps its lockdown (/lockdown): a file of a few bytes. On an emptyDir (the default) it survives a restarted
+# container but not a new pod, and the new hub then starts unlocked without saying so. With persistence it is kept on a
+# PersistentVolumeClaim (ReadWriteOnce; the Recreate strategy makes sure two pods never hold it at once).
+state:
+  persistence:
+    enabled: false
+    size: 1Gi           # a cloud disk has a smallest size (10Gi for pd-balanced); the chart asks for what you write
+    storageClassName: ""  # empty: the cluster's default class
 
 secrets:
   botToken:
-    existingSecret: petrvs-bridge-bot            # a Secret with the bot token under the key below
+    secretName: petrvs-bridge-bot            # a Secret with the bot token under the key below
     key: token
+    externalSecret:
+      remoteKey: ""     # set: an ExternalSecret (below) makes that Secret from this entry of the secret store, so nobody creates it by hand
   identity:
-    existingSecret: petrvs-bridge-hub-identity   # a Secret that holds the hub's private identity file
+    secretName: petrvs-bridge-hub-identity   # a Secret that holds the hub's private identity file
     fileName: hub.identity.json
+    externalSecret:
+      remoteKey: ""     # set: the same for the identity file (its content is the value of the entry)
+
+# Used by the ExternalSecrets above (the External Secrets Operator must be installed). The chart never holds a secret value.
+externalSecrets:
+  secretStore:
+    kind: ClusterSecretStore
+    name: ""            # required when a remoteKey is set
+  refreshInterval: 1h
 
 agents:
   # The agents that may connect: one NAME.pub.json per agent (public bundles, not secret). Either give them here ...
@@ -67,6 +82,15 @@ affinity: {}
 
 networkPolicy:
   enabled: true
+  # Outbound HTTPS and DNS to any address by default. false: HTTPS not to the private, link-local and shared ranges (10/8,
+  # 172.16/12, 192.168/16, 169.254/16, 100.64/10) and DNS only to kube-dns and the node's DNS cache (169.254.20.10), so the pod
+  # can reach Telegram and Google but nothing inside the cluster or the VPC. Keep true if Google APIs are reached through a
+  # private endpoint (Private Service Connect), or if the cluster's DNS is not kube-dns.
+  allowPrivateRanges: true
+  # true: the chart also makes the policies of the whole namespace, `default-deny` (nothing in or out for any pod that no other policy opens) and
+  # `allow-dns` (DNS for every pod, to kube-dns and the node's DNS cache), so that a pod of no release, such as a debugging pod, can talk to nothing.
+  # Their names are fixed: turn it on in one release per namespace.
+  namespaceDefaultDeny: false
   # Only outbound traffic is needed (Telegram and Google APIs, DNS); nothing listens. Further egress rules go here.
   extraEgress: []
   # GKE Workload Identity reaches Google through a metadata server on the node. With a network policy that server has to

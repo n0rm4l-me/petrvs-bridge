@@ -47,9 +47,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "hub.image" -}}
 {{- $repo := required "image.repository is required" .Values.image.repository -}}
 {{- if .Values.image.digest -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) -}}{{ fail (printf "image.digest %q is not sha256: followed by 64 hexadecimal characters" .Values.image.digest) }}{{- end -}}
 {{- printf "%s@%s" $repo .Values.image.digest -}}
 {{- else -}}
-{{- printf "%s:%s" $repo (default .Chart.AppVersion .Values.image.tag) -}}
+{{- $tag := required "image.digest (preferred) or image.tag is required: the chart does not guess a tag, since one that does not exist fails only when the pod starts" .Values.image.tag -}}
+{{- if has $tag (list "latest" "local" "dev") -}}{{ fail (printf "image.tag %q is a moving tag: use a digest or a fixed tag" $tag) }}{{- end -}}
+{{- printf "%s:%s" $repo $tag -}}
 {{- end -}}
 {{- end -}}
 

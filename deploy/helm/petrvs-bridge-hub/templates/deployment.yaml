@@ -62,7 +62,7 @@ spec:
             - {name: PB_USER_ID, value: {{ include "hub.id" (list "hub.userId" .) }}}
             {{- end }}
             - {name: PB_ALLOW_GROUP_READ, value: "true"}      # the secret volume is group-readable because of fsGroup
-            - {name: PB_LOCK_FILE, value: /state/lockdown}    # survives a container restart, not a deleted pod
+            - {name: PB_LOCK_FILE, value: /state/lockdown}    # a file on the state volume: kept across a pod only with state.persistence
             - {name: PB_LOG_LEVEL, value: {{ .Values.hub.logLevel | quote }}}
             - {name: PB_RECEIVED_REACTION, value: {{ .Values.hub.receivedReaction | quote }}}
             - {name: PB_DELIVERED_REACTION, value: {{ .Values.hub.deliveredReaction | quote }}}
@@ -85,7 +85,7 @@ spec:
             - name: TELEGRAM_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secrets.botToken.existingSecret }}
+                  name: {{ .Values.secrets.botToken.secretName }}
                   key: {{ .Values.secrets.botToken.key }}
             {{- with .Values.hub.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -98,10 +98,15 @@ spec:
             - {name: state, mountPath: /state}
       volumes:
         - name: state
+          {{- if .Values.state.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "hub.fullname" . }}-state
+          {{- else }}
           emptyDir: {sizeLimit: 1Mi}
+          {{- end }}
         - name: keys
           secret:
-            secretName: {{ .Values.secrets.identity.existingSecret }}
+            secretName: {{ .Values.secrets.identity.secretName }}
             defaultMode: 0440
         - name: agents
           configMap:

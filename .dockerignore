@@ -28,3 +28,9 @@ agents
 **/application_default_credentials.json
 **/client_secret*.json
 **/credentials*.json
+
+# Terraform (never part of the image)
+deploy/terraform
+**/.terraform
+**/*.tfstate*
+**/*.tfvars

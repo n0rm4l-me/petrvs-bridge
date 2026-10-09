@@ -1,0 +1,21 @@
+# Copy to terraform.tfvars (ignored by git) or pass with `terraform plan -var-file=...`. Nothing here is secret, but it
+# names your project: keep your copy out of the repository.
+
+project_id = "my-project"
+region     = "us-central1"
+
+# The agent's name must match PB_NAME of the agent and the NAME.pub.json file the hub reads.
+# The members are the people or service accounts that run that agent (they get Application Default Credentials on the machine).
+agents = {
+  laptop = ["user:me@example.com"]
+}
+
+# prefix = "pb"                        # PB_PREFIX of the hub and the agents
+# hub_service_account_id = "bridge-hub"
+# kubernetes_namespace   = "petrvs-bridge"
+# kubernetes_service_account = "bridge-petrvs-bridge-hub"   # RELEASE-petrvs-bridge-hub for the chart's release name
+# create_registry  = true
+# registry_readers = []                # the nodes' service account, if the pod cannot pull the image
+labels = {
+  purpose = "trial"
+}

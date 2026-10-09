@@ -2,9 +2,19 @@ The hub {{ include "hub.fullname" . }} is installed. It listens on nothing; it t
 
 Before it can work, these must exist:
 
-1. Secrets (never in the values):
-     kubectl create secret generic {{ .Values.secrets.botToken.existingSecret }} --from-file={{ .Values.secrets.botToken.key }}=/path/to/token-file
-     kubectl create secret generic {{ .Values.secrets.identity.existingSecret }} --from-file={{ .Values.secrets.identity.fileName }}=/path/to/hub.identity.json
+1. Secrets (never in the values), each of the two on its own:
+{{- if .Values.secrets.botToken.externalSecret.remoteKey }}
+     {{ .Values.secrets.botToken.secretName }}: made by an ExternalSecret of this release from the entry {{ .Values.secrets.botToken.externalSecret.remoteKey }} of the secret store
+       {{ .Values.externalSecrets.secretStore.name }}; a person must have put a value in the entry first.
+{{- else }}
+     kubectl --context CONTEXT --namespace {{ .Release.Namespace }} create secret generic {{ .Values.secrets.botToken.secretName }} --from-file={{ .Values.secrets.botToken.key }}=/path/to/token-file
+{{- end }}
+{{- if .Values.secrets.identity.externalSecret.remoteKey }}
+     {{ .Values.secrets.identity.secretName }}: made by an ExternalSecret of this release from the entry {{ .Values.secrets.identity.externalSecret.remoteKey }} of the secret store
+       {{ .Values.externalSecrets.secretStore.name }}; a person must have put a value in the entry first.
+{{- else }}
+     kubectl --context CONTEXT --namespace {{ .Release.Namespace }} create secret generic {{ .Values.secrets.identity.secretName }} --from-file={{ .Values.secrets.identity.fileName }}=/path/to/hub.identity.json
+{{- end }}
 
 2. Pub/Sub topics and subscriptions in project {{ .Values.pubsub.project }} (the hub does not create them):
      {{ .Values.pubsub.prefix }}-to-hub            topic; subscription {{ .Values.pubsub.prefix }}-hub
@@ -14,9 +24,13 @@ Before it can work, these must exist:
 3. Access for the hub's service account {{ include "hub.serviceAccountName" . }}: publisher on each agent topic and
    subscriber on {{ .Values.pubsub.prefix }}-hub.
 
+{{- if .Values.state.persistence.enabled }}
+The hub's lockdown (/lockdown) is kept on a PersistentVolumeClaim, so a new pod (an upgrade, a drain, an eviction) keeps it.
+{{- else }}
 Mind this: the hub's lockdown (/lockdown) is kept on an emptyDir. It survives a restarted container but not a new pod
 (a helm upgrade that changes the pod, such as a new image or agent list, a node drain, an eviction), and the new hub then
 starts unlocked without saying so. If a lockdown was on, send /lockdown again after any of those (it is safe to repeat),
-or keep the file on a small PersistentVolumeClaim. See docs/DEPLOY.md.
+or set state.persistence.enabled to keep the file on a small PersistentVolumeClaim.
+{{- end }}
 
-Check the hub with:  kubectl logs deploy/{{ include "hub.fullname" . }}
+Check the hub with:  kubectl --context CONTEXT --namespace {{ .Release.Namespace }} logs deploy/{{ include "hub.fullname" . }}

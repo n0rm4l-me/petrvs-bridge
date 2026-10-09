@@ -18,3 +18,11 @@ alarm-secret*
 application_default_credentials.json
 client_secret*.json
 credentials*.json
+
+# Terraform: local state and plans name real resources; the provider cache is large. Commit .terraform.lock.hcl.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+crash.log

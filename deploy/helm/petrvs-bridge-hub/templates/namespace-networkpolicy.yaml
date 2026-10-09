@@ -1,0 +1,43 @@
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.namespaceDefaultDeny }}
+# Deny everything, in both directions, for every pod of the namespace. What a pod may do is then only what another policy allows (the policy of the hub,
+# in networkpolicy.yaml, opens what the hub needs).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  labels:
+    {{- include "hub.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# DNS for every pod of the namespace: the pods of kube-dns and the node's DNS cache (NodeLocal DNSCache, 169.254.20.10), which is the nameserver in the
+# pod's /etc/resolv.conf on GKE.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  labels:
+    {{- include "hub.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+        - ipBlock:
+            cidr: 169.254.20.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

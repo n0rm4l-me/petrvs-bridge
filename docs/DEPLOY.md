@@ -28,6 +28,9 @@ uploads the source to Google Cloud Storage; `_PLATFORM`, default `linux/amd64`, 
 
 ## 2. Pub/Sub
 
+Steps 2 and 3 can be done with Terraform instead of the commands below: see [deploy/terraform](../deploy/terraform/README.md)
+(not yet applied to a real project either).
+
 For prefix `pb` and an agent called `laptop` (see the README for the properties and for the per-party access rules):
 
 ```sh
@@ -50,6 +53,12 @@ gcloud pubsub subscriptions add-iam-policy-binding pb-hub --member=serviceAccoun
 Put the Google service account in the chart's `serviceAccount.annotations` (`iam.gke.io/gcp-service-account`).
 
 ## 4. Secrets and keys
+
+If the External Secrets Operator runs in the cluster, the two Secrets below need not be created by hand: put the bot token
+and the hub's identity file into your secret store as two entries, and give the chart their names
+(`secrets.botToken.externalSecret.remoteKey`, `secrets.identity.externalSecret.remoteKey`) and the store
+(`externalSecrets.secretStore.name`, and `.kind` if it is not a `ClusterSecretStore`). The chart then renders two
+ExternalSecrets that make the Secrets; it never holds a value.
 
 ```sh
 kubectl create namespace bridge
