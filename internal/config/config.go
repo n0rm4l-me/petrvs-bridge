@@ -30,9 +30,9 @@ type Common struct {
 	// AllowGroupRead lets private files (identity, secrets) be readable by their group, for example a Kubernetes
 	// secret volume with fsGroup. Other users still may not read them.
 	AllowGroupRead bool
-	// Pull is how the subscription is read: "stream" (one long streaming call, the default) or "unary" (short calls, each
-	// with a deadline). A tunnel or a TLS-inspecting proxy between this machine and Google can hold a long stream back and
-	// let it out in lumps; short calls pass it.
+	// Pull is how the subscription is read: "stream" (one long streaming call, the default of the hub) or "unary" (short calls,
+	// each with a deadline; the default of the agent). A tunnel or a TLS-inspecting proxy between a laptop and Google can hold
+	// a long stream back and let it out in lumps; short calls pass it.
 	Pull string
 }
 
@@ -213,13 +213,15 @@ func stateDir(e *env) string {
 	return filepath.Join(home, ".local", "state", "petrvs-bridge")
 }
 
-func common(fs *flag.FlagSet, e *env, c *Common) {
+// common declares the settings of both programs. pull is the default way to read the subscription of the program: the hub runs
+// in a data centre and keeps the stream, the agent runs on a laptop behind whatever network it is on and asks with short calls.
+func common(fs *flag.FlagSet, e *env, c *Common, pull string) {
 	fs.StringVar(&c.Project, "project", e.str("PB_PROJECT", e.str("GOOGLE_CLOUD_PROJECT", "")), "Pub/Sub project id (env PB_PROJECT)")
 	fs.StringVar(&c.Prefix, "prefix", e.str("PB_PREFIX", "pb"), "topic/subscription name prefix (env PB_PREFIX)")
 	fs.StringVar(&c.Identity, "identity", e.str("PB_IDENTITY", ""), "path of the private identity file (env PB_IDENTITY)")
 	fs.StringVar(&c.LogLevel, "log-level", e.str("PB_LOG_LEVEL", "info"), "debug, info, warn or error (env PB_LOG_LEVEL)")
 	fs.BoolVar(&c.CreateResources, "create-resources", e.boolean("PB_CREATE_RESOURCES", false), "create topics and subscriptions; development and the emulator only (env PB_CREATE_RESOURCES)")
-	fs.StringVar(&c.Pull, "pull", e.str("PB_PULL", "stream"), "how the subscription is read: stream, or unary for a network that holds a long stream back (env PB_PULL)")
+	fs.StringVar(&c.Pull, "pull", e.str("PB_PULL", pull), "how the subscription is read: unary (short calls; the default of the agent) or stream (one long call; the default of the hub) (env PB_PULL)")
 	fs.BoolVar(&c.AllowGroupRead, "allow-group-read", e.boolean("PB_ALLOW_GROUP_READ", false), "accept private files that their group may read, for a Kubernetes secret volume with fsGroup (env PB_ALLOW_GROUP_READ)")
 }
 
@@ -331,7 +333,7 @@ func ParseHub(args []string, getenv func(string) string) (*Hub, error) {
 	e := &env{get: getenv}
 	h := &Hub{}
 	fs := flag.NewFlagSet("hub", flag.ContinueOnError)
-	common(fs, e, &h.Common)
+	common(fs, e, &h.Common, "stream")
 	fs.StringVar(&h.AgentsDir, "agents-dir", e.str("PB_AGENTS_DIR", ""), "directory holding one *.pub.json per agent that may connect (env PB_AGENTS_DIR)")
 	fs.StringVar(&h.TelegramBase, "telegram-api", e.str("PB_TELEGRAM_API_BASE", "https://api.telegram.org"), "Bot API base URL (env PB_TELEGRAM_API_BASE)")
 	fs.Int64Var(&h.ChatID, "chat-id", e.int64("PB_CHAT_ID"), "the only chat that is obeyed (env PB_CHAT_ID)")
@@ -396,7 +398,7 @@ func ParseAgent(args []string, getenv func(string) string) (*Agent, error) {
 	e := &env{get: getenv}
 	a := &Agent{}
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
-	common(fs, e, &a.Common)
+	common(fs, e, &a.Common, "unary")
 	sd := stateDir(e)
 	fs.StringVar(&a.Name, "name", e.str("PB_NAME", ""), "this agent's name; must match its identity (env PB_NAME)")
 	fs.StringVar(&a.HubPub, "hub-pub", e.str("PB_HUB_PUB", ""), "path of the hub's public bundle, pinned at enrolment (env PB_HUB_PUB)")

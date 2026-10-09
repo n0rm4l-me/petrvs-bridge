@@ -518,15 +518,53 @@ func TestHubHealthAndShutdownSettings(t *testing.T) {
 	}
 }
 
-func TestPullDefaultsToTheStreamAndAcceptsUnary(t *testing.T) {
+func TestPullDefaultsToTheStreamForTheHubAndToShortCallsForTheAgent(t *testing.T) {
 	h, err := ParseHub(nil, envOf(hubEnv()))
 	if err != nil || h.Pull != "stream" {
-		t.Fatalf("%v %+v", err, h)
+		t.Fatalf("hub: %v %+v", err, h)
 	}
-	e := agentEnv(t)
-	e["PB_PULL"] = "unary"
-	a, err := ParseAgent(nil, envOf(e))
+	a, err := ParseAgent(nil, envOf(agentEnv(t)))
 	if err != nil || a.Pull != "unary" {
-		t.Fatalf("%v %+v", err, a)
+		t.Fatalf("agent: %v %+v", err, a)
+	}
+}
+
+func TestPullCanBeChosenForEitherProgramByTheEnvironmentOrAFlag(t *testing.T) {
+	e := agentEnv(t)
+	e["PB_PULL"] = "stream"
+	a, err := ParseAgent(nil, envOf(e))
+	if err != nil || a.Pull != "stream" {
+		t.Fatalf("agent, env: %v %+v", err, a)
+	}
+	a, err = ParseAgent([]string{"-pull", "unary"}, envOf(e))
+	if err != nil || a.Pull != "unary" {
+		t.Fatalf("agent, flag over env: %v %+v", err, a)
+	}
+	he := hubEnv()
+	he["PB_PULL"] = "unary"
+	h, err := ParseHub(nil, envOf(he))
+	if err != nil || h.Pull != "unary" {
+		t.Fatalf("hub, env: %v %+v", err, h)
+	}
+}
+
+func TestAWrongPullIsAnErrorAndNotASilentFallback(t *testing.T) {
+	for _, bad := range []string{"push", "Unary", "streaming", "stream,unary"} {
+		e := agentEnv(t)
+		e["PB_PULL"] = bad
+		if a, err := ParseAgent(nil, envOf(e)); err == nil || !strings.Contains(err.Error(), "pull") {
+			t.Errorf("agent accepted PB_PULL=%q: %v %+v", bad, err, a)
+		}
+		he := hubEnv()
+		he["PB_PULL"] = bad
+		if _, err := ParseHub(nil, envOf(he)); err == nil || !strings.Contains(err.Error(), "pull") {
+			t.Errorf("hub accepted PB_PULL=%q: %v", bad, err)
+		}
+	}
+	// An empty value is the same as unset: the default of the program.
+	e := agentEnv(t)
+	e["PB_PULL"] = ""
+	if a, err := ParseAgent(nil, envOf(e)); err != nil || a.Pull != "unary" {
+		t.Errorf("an empty PB_PULL: %v %+v", err, a)
 	}
 }

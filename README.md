@@ -253,7 +253,7 @@ unknown flag prints them too, and exits with 2).
 | `PB_RECEIVED_REACTION` | `-received-reaction` | `off` | An early mark the hub puts on each of your messages as soon as it has read it, before the agent has; `off` (the default) for none. Telegram accepts only a fixed set of reaction emoji (see `ReactionTypeEmoji` in the Bot API documentation, for example 👀 👍 🔥 🎉 🫡 🤝 ⚡); if it refuses yours the hub says so once in its log and stops marking |
 | `PB_LOCK_FILE` | `-lock-file` | unset | File that keeps the hub's lockdown across restarts of the process. Unset, a restart forgets a lockdown. In Kubernetes the chart puts it on an `emptyDir`, which is forgotten when the pod is replaced (see Limitations) |
 | `PB_ALLOW_GROUP_READ` | `-allow-group-read` | `false` | Also accept private files that are group-readable (0640), for a Kubernetes secret volume with `fsGroup`. Never world-readable |
-| `PB_PULL` | `-pull` | `stream` | How the subscription is read. `stream` keeps one streaming call open. `unary` asks with short calls that each have a deadline: use it when the network between the machine and Google (a tunnel, a TLS-inspecting proxy) holds a long stream back and lets it out in lumps, which shows as a new handshake every two minutes and heartbeats that arrive late and together |
+| `PB_PULL` | `-pull` | `stream` | How the hub reads its subscription. `stream` keeps one streaming call open; it is the right choice in a data centre or a cluster. `unary` asks with short calls that each have a deadline (see below). Any other value is a configuration error |
 | `PB_LOG_LEVEL` | `-log-level` | `info` | `debug`, `info`, `warn`, `error`. Logs never contain message text or tokens. Both programs write JSON lines; the hub names the fields `severity` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) and `message`, which is what Cloud Logging on GKE reads, and the agent `level` and `msg` |
 | `PUBSUB_EMULATOR_HOST` | none | unset | Use the emulator instead of the real service |
 | `GOOGLE_APPLICATION_CREDENTIALS` | none | | Standard Google credentials (or workload identity, or the metadata server) |
@@ -286,8 +286,18 @@ unknown flag prints them too, and exits with 2).
 | `PB_HEAL_TRIES`, `PB_HEAL_WINDOW` | `-heal-tries`, `-heal-window` | `3`, `10m` | Starts allowed within the window before auto-heal gives up |
 | `PB_STUCK_AFTER` | `-stuck-after` | `10m` | Tell the chat when a request has had no reply for this long; `0` or `off` turns it off |
 | `PB_ALLOW_GROUP_READ` | `-allow-group-read` | `false` | As for the hub |
-| `PB_PULL` | `-pull` | `stream` | As for the hub |
+| `PB_PULL` | `-pull` | `unary` | How the agent reads its subscription: `unary` (short calls) or `stream` (one long streaming call). Any other value is a configuration error. The agent says which one it uses in its `agent running` log line (field `pull`). See below |
 | `GOOGLE_APPLICATION_CREDENTIALS`, `PUBSUB_EMULATOR_HOST` | | | As for the hub |
+
+**How the agent reads its subscription (`PB_PULL`).** The agent runs on a machine you do not control the network of, and a tunnel, a VPN or a
+proxy that inspects TLS can hold a long streaming call back and let it out in lumps. The signs are heartbeats that arrive in groups, messages that the service delivers more than once, an unacknowledged message that grows old, and each silence of 90 s (`PB_SILENCE_LIMIT`) beginning a new handshake that cuts the chat. With
+`unary` the agent asks with `Pull` calls that each end by themselves or after a 25-second deadline, so a stalled call is given up and made again;
+it keeps the lease of a message while its handler runs, sends the acknowledgements in batches and once more when it stops. This is why it is the
+default of the agent. The price is more requests (about five `Pull` calls a minute when idle, and one `Acknowledge` per batch) and a little
+latency: in one measurement, about 130 ms more on the median of a reply (measured with a probe through the whole path). Choose `stream` if
+your network passes long calls, and your agent will make fewer requests; the hub keeps `stream` because it runs where nothing holds the stream back. A sign that
+the agent should be on `unary`: `session established` in its log every two minutes or so, and many `rejected message` lines with `other session` or
+`ack for unknown hello` (at `PB_LOG_LEVEL=debug`).
 
 Other agent commands: `agent send [-type reply|notice|alert] [TEXT | -]` queues a message for the hub (reads standard
 input for `-`); it only needs `PB_STATE_DIR` (and exits 1 when the body is too large once escaped for storage).
