@@ -29,7 +29,8 @@
   the least rights the client uses (`hub slack-manifest` lists them) and reads no channel. Two tokens are secrets: the **bot token**
   posts as the app and reads its direct messages; the **app-level token** opens Socket Mode connections, and an event goes to one
   of the connections that are open, so someone who holds it can receive some of the user's messages and acknowledge them, and the
-  hub never sees them. Keep both in the secret store, rotate them by reinstalling the app, and look at the app's connections
+  hub never sees them. Keep both in the secret store. Reinstalling the app issues a new bot token; the app-level token is made again
+  under *Basic Information*, *App-Level Tokens*. Look at the app's connections
   (api.slack.com/apps) if messages go missing. An event is acknowledged to Slack when it arrives, so a hub that stops
   right then loses it; the user sends it again. After a gap in the socket the client reads the history of the direct message back
   from the last message it heard of, through the same checks, and a restarted hub reads nothing back on purpose (a command must

@@ -48,14 +48,28 @@ func decodeToken(inner string) string {
 		}
 		return ""
 	case strings.HasPrefix(body, "mailto:"):
-		if hasLabel && label != "" {
-			return label
-		}
-		return strings.TrimPrefix(body, "mailto:")
+		return withLabel(strings.TrimPrefix(body, "mailto:"), label, hasLabel)
 	case strings.HasPrefix(body, "http://"), strings.HasPrefix(body, "https://"), strings.HasPrefix(body, "tel:"):
-		return body // the address as it is; a label is only what Slack shows
+		return withLabel(body, label, hasLabel)
 	}
 	return body
+}
+
+// withLabel gives the text of a link as the user wrote it. Slack writes a bare name that looks like an address (setup.py, README.md)
+// as <http://setup.py|setup.py>: the label is what was typed, and the address only what Slack made of it, so the label is the text.
+// A link with another label (a pasted rich link) is the label and, so that nothing is hidden, the address in brackets.
+func withLabel(address, label string, hasLabel bool) string {
+	if !hasLabel || label == "" {
+		return address
+	}
+	bare := address
+	for _, scheme := range []string{"https://", "http://", "tel:"} {
+		bare = strings.TrimPrefix(bare, scheme)
+	}
+	if strings.EqualFold(strings.TrimRight(label, "/"), strings.TrimRight(bare, "/")) {
+		return label
+	}
+	return label + " (" + address + ")"
 }
 
 // cleanText removes what must not reach a terminal from text that is passed on: the escape character and other control

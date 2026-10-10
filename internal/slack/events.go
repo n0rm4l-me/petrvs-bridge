@@ -77,7 +77,7 @@ func (c *Client) onEvent(payload json.RawMessage) {
 // message deals with a message that was written in a direct message: one that came as an event, or one read back from the
 // history after a gap (backfill). Both go through the same checks, and a message that comes twice is handled once.
 func (c *Client) message(ev messageEvent, team string) {
-	if ev.Type != "message" || ev.ChannelType != "im" || ev.BotID != "" || ev.User == "" || ev.Channel == "" {
+	if ev.Type != "message" || ev.ChannelType != "im" || ev.BotID != "" || !ValidUserID(ev.User) || !anyChannelRe.MatchString(ev.Channel) {
 		return
 	}
 	c.mu.Lock()
@@ -86,8 +86,9 @@ func (c *Client) message(ev messageEvent, team string) {
 	if ev.User == bot {
 		return
 	}
-	// Only a new message of a person: not an edit, a deletion, a join, a bot's message or a reminder.
-	if ev.Subtype != "" && ev.Subtype != "file_share" {
+	// Only a new message of a person: not an edit, a deletion, a join, a bot's message or a reminder. A file, and a reply in a
+	// thread that was also sent to the channel, are the user's own words.
+	if ev.Subtype != "" && ev.Subtype != "file_share" && ev.Subtype != "thread_broadcast" {
 		return
 	}
 	id, ok := tsToID(ev.TS)
@@ -173,12 +174,12 @@ func (c *Client) onInteractive(payload json.RawMessage) {
 	if json.Unmarshal(payload, &p) != nil || p.Type != "block_actions" || len(p.Actions) == 0 || p.Actions[0].Type != "button" {
 		return
 	}
-	if p.TriggerID == "" || len(p.TriggerID) > 128 {
-		return
-	}
 	channel := p.Channel.ID
 	if channel == "" {
 		channel = p.Container.ChannelID
+	}
+	if !triggerRe.MatchString(p.TriggerID) || !anyChannelRe.MatchString(channel) || !ValidUserID(p.User.ID) {
+		return
 	}
 	ts := p.Message.TS
 	if ts == "" {
@@ -189,7 +190,7 @@ func (c *Client) onInteractive(payload json.RawMessage) {
 	u := telegram.Update{ChatID: chatID, UserID: userID, MessageID: mid, CallbackID: p.TriggerID, CallbackData: cut(p.Actions[0].Value, 2000), Date: c.cfg.Now()}
 	if !allowed {
 		u.CallbackData = "-"
-	} else if _, ok := c.trusted(p.ResponseURL, "https", "http"); ok {
+	} else if _, ok := c.trustedHTTP(p.ResponseURL, "hooks.slack.com"); ok {
 		c.mu.Lock()
 		c.respURLs[p.TriggerID] = p.ResponseURL
 		c.respRing = append(c.respRing, p.TriggerID)
@@ -226,6 +227,9 @@ func (c *Client) onSlash(payload json.RawMessage) any {
 	if !slashNameRe.MatchString(name) {
 		return nil
 	}
+	if !triggerRe.MatchString(p.TriggerID) || !anyChannelRe.MatchString(p.ChannelID) || !ValidUserID(p.UserID) {
+		return nil
+	}
 	chatID, userID, allowed := c.who(p.ChannelID, p.UserID, p.TeamID)
 	if userID != UserID {
 		c.push("t:"+p.TriggerID, telegram.Update{ChatID: chatID, UserID: userID, Text: "-", Date: c.cfg.Now()})
@@ -238,9 +242,6 @@ func (c *Client) onSlash(payload json.RawMessage) any {
 	text := "/" + name
 	if arg := strings.TrimSpace(cleanText(p.Text)); arg != "" {
 		text += " " + arg
-	}
-	if p.TriggerID == "" {
-		return nil
 	}
 	c.push("t:"+p.TriggerID, telegram.Update{ChatID: ChatID, UserID: UserID, Text: text, Date: c.cfg.Now()})
 	return nil
@@ -263,7 +264,7 @@ func (c *Client) AnswerCallback(ctx context.Context, callbackID, text string) er
 	if !ok {
 		return nil
 	}
-	u, ok := c.trusted(raw, "https", "http")
+	u, ok := c.trustedHTTP(raw, "hooks.slack.com")
 	if !ok {
 		return nil
 	}

@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/n0rm4l-me/petrvs-bridge/internal/slack/slackid"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/telegram"
 )
 
@@ -67,6 +69,8 @@ type Client struct {
 
 	// connected is the time the socket last said hello, or was last known to be up; connectedNow says that it is up now.
 	connectedNow atomic.Bool
+	everUp       atomic.Bool   // the socket has said hello at least once
+	hello        chan struct{} // told on every hello, for a GetUpdates that waits for the first one
 	lastUp       atomic.Int64
 	sending      chan struct{}
 	strangers    atomic.Uint64
@@ -77,17 +81,12 @@ func HelpNote(prefix string) string {
 	return "In Slack every command is a slash command of the app with the prefix " + prefix + ", for example /" + prefix + "status or /" + prefix + "key 2."
 }
 
-// ValidAPIBase says that s can be the address of the Web API: https, or plain http to a loopback address (tests).
-func ValidAPIBase(s string) bool {
-	u, err := url.Parse(strings.TrimRight(s, "/"))
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return false
-	}
-	return u.Scheme == "https" || (u.Scheme == "http" && isLoopback(u.Hostname()))
-}
+// ValidAPIBase says that s can be the address of the Web API: https on slack.com (the tokens go there), or plain http to a loopback
+// address (tests).
+func ValidAPIBase(s string) bool { return slackid.ValidAPIBase(s) }
 
 // ValidCommandPrefix says that s can be put before the names of the slash commands.
-func ValidCommandPrefix(s string) bool { return commandPrefixRe.MatchString(s) }
+func ValidCommandPrefix(s string) bool { return slackid.ValidCommandPrefix(s) }
 
 // New checks the settings and returns a client. It starts nothing: Run does.
 func New(cfg Config) (*Client, error) {
@@ -104,27 +103,17 @@ func New(cfg Config) (*Client, error) {
 	if cfg.CommandPrefix == "" {
 		cfg.CommandPrefix = "pb-"
 	}
-	if !commandPrefixRe.MatchString(cfg.CommandPrefix) {
+	if !ValidCommandPrefix(cfg.CommandPrefix) {
 		return nil, errors.New("slack: the command prefix is lower-case letters, digits, - and _, at most 10 characters")
 	}
 	if cfg.APIBase == "" {
 		cfg.APIBase = DefaultAPIBase
 	}
-	base, err := url.Parse(strings.TrimRight(cfg.APIBase, "/"))
-	if err != nil || base.Host == "" || base.User != nil {
-		return nil, errors.New("slack: the API address is not a valid URL")
+	if !ValidAPIBase(cfg.APIBase) {
+		return nil, errors.New("slack: the API address must be https on slack.com (plain http only for localhost, for tests)")
 	}
-	loop := false
-	switch base.Scheme {
-	case "https":
-	case "http":
-		if !isLoopback(base.Hostname()) {
-			return nil, errors.New("slack: plain http is accepted only for localhost; the tokens would cross the network in the clear")
-		}
-		loop = true
-	default:
-		return nil, errors.New("slack: use an https API address")
-	}
+	base, _ := url.Parse(strings.TrimRight(cfg.APIBase, "/"))
+	loop := base.Scheme == "http"
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -147,7 +136,7 @@ func New(cfg Config) (*Client, error) {
 	}
 	c := &Client{
 		cfg: cfg, log: cfg.Log.With("chat", "slack"), api: &apiClient{base: strings.TrimRight(cfg.APIBase, "/"), hc: hc},
-		loop: loop, base: base, channel: cfg.ChannelID, started: cfg.Now(), notify: make(chan struct{}, 1), nextID: 1,
+		loop: loop, base: base, started: cfg.Now(), notify: make(chan struct{}, 1), hello: make(chan struct{}, 1), nextID: 1,
 		seen: map[string]struct{}{}, respURLs: map[string]string{}, reacted: map[int64]string{}, sending: make(chan struct{}, 1),
 	}
 	c.lastUp.Store(cfg.Now().UnixNano())
@@ -157,8 +146,6 @@ func New(cfg Config) (*Client, error) {
 type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
-
-func isLoopback(h string) bool { return h == "localhost" || h == "127.0.0.1" || h == "::1" }
 
 // newTransport is the default transport with HTTP/2 health checks, so that a connection that went silent is closed and not reused.
 func newTransport() http.RoundTripper {
@@ -182,28 +169,36 @@ func sameHostOnly(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
-// trusted says whether an address that Slack handed out (the socket, an upload, a download, a response) may be used: https on
-// a Slack domain with no credentials in it. For a client on a loopback API (tests) the same host and port as the API.
-func (c *Client) trusted(raw string, schemes ...string) (*url.URL, bool) {
+// trustedHTTP says whether an address that Slack handed out (an upload, a download, a response) may be used: https, on one of the
+// hosts given (a name, or a suffix that starts with a dot), no credentials in it, the usual port. Plain http is never trusted,
+// since the bot token goes with a download. For a client on a loopback API (tests) the same host and port as the API.
+func (c *Client) trustedHTTP(raw string, hosts ...string) (*url.URL, bool) {
+	return c.trusted(raw, []string{"https"}, []string{"http", "https"}, hosts)
+}
+
+// trustedSocket is trustedHTTP for the address of the WebSocket (wss on a host of slack.com).
+func (c *Client) trustedSocket(raw string) (*url.URL, bool) {
+	return c.trusted(raw, []string{"wss"}, []string{"ws", "wss"}, []string{".slack.com"})
+}
+
+func (c *Client) trusted(raw string, schemes, loopSchemes, hosts []string) (*url.URL, bool) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" {
 		return nil, false
 	}
-	ok := false
-	for _, s := range schemes {
-		ok = ok || u.Scheme == s
-	}
-	if !ok {
-		return nil, false
-	}
 	if c.loop {
-		return u, u.Host == c.base.Host
+		return u, slices.Contains(loopSchemes, u.Scheme) && u.Host == c.base.Host
+	}
+	if !slices.Contains(schemes, u.Scheme) || (u.Port() != "" && u.Port() != "443") {
+		return nil, false
 	}
 	h := strings.ToLower(u.Hostname())
-	if (u.Port() != "" && u.Port() != "443") || !(h == "slack.com" || strings.HasSuffix(h, ".slack.com")) {
-		return nil, false
+	for _, want := range hosts {
+		if h == want || (strings.HasPrefix(want, ".") && strings.HasSuffix(h, want)) {
+			return u, true
+		}
 	}
-	return u, true
+	return nil, false
 }
 
 // DMChannel is the allowed direct message once it is known.
@@ -242,14 +237,19 @@ func (c *Client) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if c.cfg.Now().Sub(began) > 30*time.Second {
+		lasted := c.cfg.Now().Sub(began) > 30*time.Second
+		if lasted {
 			wait = c.cfg.ReconnectMin // it worked for a while: the next failure is a new one
 		}
 		if err != nil && !errors.Is(err, errReconnect) {
 			c.log.Warn("the connection to Slack ended", "err", err, "retry_in", wait)
 		} else {
+			// Slack asks for a new connection every few hours, and that is no failure: go back at once. But a socket that was closed at
+			// once, over and over, is one: it gets the waits of any failure, so that a Slack that keeps asking is not asked back in a loop.
 			c.log.Info("Slack asked for a new connection")
-			wait = 0
+			if lasted {
+				wait = 0
+			}
 		}
 		if !sleep(ctx, wait) {
 			return
@@ -288,27 +288,39 @@ func (c *Client) start(ctx context.Context) error {
 	}
 	c.mu.Lock()
 	c.botUser, c.team = who.UserID, who.TeamID
-	have := c.channel
 	c.mu.Unlock()
-	if have != "" {
-		return nil
-	}
+	// Slack is asked for the direct message even when it is configured: a channel id that is not the one with this user would
+	// send what the agent writes to someone else's conversation. (The answer is the same every time; opening it again is free.)
 	var open struct {
 		reply
 		Channel struct {
 			ID string `json:"id"`
 		} `json:"channel"`
 	}
-	if err := c.callRetry(ctx, "conversations.open", c.cfg.BotToken, url.Values{"users": {c.cfg.UserID}}, &open); err != nil {
-		return err
+	err := c.callRetry(ctx, "conversations.open", c.cfg.BotToken, url.Values{"users": {c.cfg.UserID}}, &open)
+	var ae *telegram.APIError
+	switch {
+	case err == nil:
+		if !ValidChannelID(open.Channel.ID) {
+			return errors.New("slack: conversations.open did not name a direct message")
+		}
+		if c.cfg.ChannelID != "" && c.cfg.ChannelID != open.Channel.ID {
+			// Permanent: the settings are wrong. Say so and do not use the channel.
+			return errors.New("slack: the configured channel is not the direct message with the configured user (" + safeWord(c.cfg.ChannelID) + " is not what Slack names for them)")
+		}
+		c.mu.Lock()
+		c.channel = open.Channel.ID
+		c.mu.Unlock()
+		return nil
+	case c.cfg.ChannelID != "" && errors.As(err, &ae) && strings.Contains(ae.Desc, "missing_scope"):
+		// An app without the im:write right cannot be asked; the configured channel is used, unchecked.
+		c.log.Warn("the app has no im:write right, so the configured channel cannot be checked against the user")
+		c.mu.Lock()
+		c.channel = c.cfg.ChannelID
+		c.mu.Unlock()
+		return nil
 	}
-	if !ValidChannelID(open.Channel.ID) {
-		return errors.New("slack: conversations.open did not name a direct message")
-	}
-	c.mu.Lock()
-	c.channel = open.Channel.ID
-	c.mu.Unlock()
-	return nil
+	return err
 }
 
 // callRetry is call for the bot, waiting out a short rate limit.
@@ -347,6 +359,8 @@ func (c *Client) acquire(ctx context.Context) error {
 
 func (c *Client) release() { <-c.sending }
 
+var errNeverUp = errors.New("slack: no Socket Mode connection yet")
+
 var errNotReady = &telegram.APIError{Method: "slack", Code: 503, Desc: "not connected to Slack yet"}
 
 // chat checks that the hub means the allowed chat and gives the channel to write to.
@@ -374,7 +388,9 @@ const (
 func (c *Client) push(key string, u telegram.Update) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if key != "" {
+	// Only the allowed user's events are remembered: a flood of strangers must not push the user's keys out of the ring and
+	// let an event that Slack sends again be handled twice.
+	if key != "" && u.ChatID == ChatID && u.UserID == UserID {
 		if _, dup := c.seen[key]; dup {
 			return
 		}
@@ -436,7 +452,13 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeout time.Dura
 		}
 		select {
 		case <-c.notify:
+		case <-c.hello:
 		case <-deadline.C:
+			if !c.everUp.Load() && timeout > 0 {
+				// Not one hello yet: a hub with a wrong token, or no way to Slack, must not look ready (as one that polls
+				// Telegram with a bad token does not).
+				return nil, errNeverUp
+			}
 			return nil, nil
 		case <-ctx.Done():
 			return nil, ctx.Err()

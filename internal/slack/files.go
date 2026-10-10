@@ -25,7 +25,9 @@ func fileName(n string) string {
 	n = strings.ReplaceAll(n, "\\", "/")
 	n = path.Base(n)
 	n = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || r == '/' || r == '‮' || r == '⁦' || r == '⁧' || r == '⁨' || r == '⁩' {
+		// no control characters, and none of the invisible ones (direction marks and overrides, zero-width, soft hyphen: category Cf)
+		// or the line and paragraph separators, which can make a name read as something else
+		if unicode.IsControl(r) || r == '/' || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
 			return -1
 		}
 		return r
@@ -61,7 +63,7 @@ func (c *Client) SendFile(ctx context.Context, chatID int64, f telegram.OutFile)
 	if err := c.callRetry(ctx, "files.getUploadURLExternal", c.cfg.BotToken, url.Values{"filename": {name}, "length": {strconv.Itoa(len(f.Data))}}, &up); err != nil {
 		return nil, err
 	}
-	u, ok := c.trusted(up.UploadURL, "https", "http")
+	u, ok := c.trustedHTTP(up.UploadURL, "files.slack.com")
 	if !ok || !fileIDRe.MatchString(up.FileID) {
 		return nil, &telegram.APIError{Method: "files.getUploadURLExternal", Code: 502, Desc: "the upload address is not a Slack address"}
 	}
@@ -90,7 +92,9 @@ func (c *Client) SendFile(ctx context.Context, chatID int64, f telegram.OutFile)
 		"channel": {ch}, "text": {bp.text}, "mrkdwn": {"false"}, "blocks": {blocks(bp, f.Buttons)},
 	}, &out)
 	if err != nil {
-		return nil, err
+		// The file is in the chat already. Failing now would make the hub send it again, and it would be there twice.
+		c.log.Warn("the buttons of a file could not be shown", "err", err)
+		return nil, nil
 	}
 	if id, ok := tsToID(out.TS); ok {
 		return []int64{id}, nil
@@ -128,7 +132,7 @@ func (c *Client) Fetch(ctx context.Context, f telegram.FileRef, maxBytes int64) 
 	if raw == "" {
 		raw = info.File.PrivateURL
 	}
-	u, ok := c.trusted(raw, "https", "http")
+	u, ok := c.trustedHTTP(raw, "files.slack.com")
 	if !ok {
 		return nil, &telegram.APIError{Method: "files.info", Code: 502, Desc: "the file is not on a Slack address"}
 	}
@@ -160,6 +164,10 @@ func (c *Client) Fetch(ctx context.Context, f telegram.FileRef, maxBytes int64) 
 	}
 	if int64(len(data)) > maxBytes {
 		return nil, telegram.ErrFileTooLarge
+	}
+	if info.File.Size > 0 && int64(len(data)) != info.File.Size {
+		// A file that is shorter than Slack says it is was cut off on the way; it must not be passed on as the file.
+		return nil, &telegram.APIError{Method: "download", Code: 502, Desc: "the download is incomplete"}
 	}
 	return data, nil
 }

@@ -98,3 +98,19 @@ func TestTheManifestInTheRepositoryIsValidJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTheDescriptionsNameTheCommandsWithTheirPrefix(t *testing.T) {
+	raw, err := Manifest("x", "pb-", []telegram.Command{
+		{Name: "alarm", Description: "Alarm status; /alarm on, /alarm off [code]"},
+		{Name: "key", Description: "Press a key: /key 2, /key btab; not /keyboard or a/key"},
+		{Name: "clear", Description: "Clear the session"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"/pb-alarm on, /pb-alarm off [code]", "/pb-key 2, /pb-key btab; not /keyboard or a/key"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("missing %q in\n%s", want, raw)
+		}
+	}
+}

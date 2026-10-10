@@ -130,13 +130,56 @@ func TestTheClientFindsItsDirectMessageAndItsBot(t *testing.T) {
 	}
 }
 
-func TestAGivenChannelIsNotLookedUp(t *testing.T) {
+func TestAGivenChannelIsCheckedAgainstTheUser(t *testing.T) {
 	r := newRig(t, func(c *Config) { c.ChannelID = slacktest.Channel })
-	if r.srv.Calls("conversations.open") != 0 {
-		t.Fatal("it asked for a channel it was given")
+	if r.srv.Calls("conversations.open") != 1 || r.c.DMChannel() != slacktest.Channel {
+		t.Fatalf("the channel was not checked: %d calls, channel %q", r.srv.Calls("conversations.open"), r.c.DMChannel())
 	}
-	if r.c.DMChannel() != slacktest.Channel {
-		t.Fatal("wrong channel")
+}
+
+func TestAChannelThatIsNotTheUsersDirectMessageIsNeverWrittenTo(t *testing.T) {
+	srv := slacktest.New(t)
+	buf := &syncBuf{}
+	c, err := New(Config{BotToken: slacktest.BotToken, AppToken: slacktest.AppToken, UserID: slacktest.UserID, APIBase: srv.APIURL(),
+		ChannelID: "D0SOMEONE2", Log: slog.New(slog.NewJSONHandler(buf, nil)), ReconnectMin: 10 * time.Millisecond, ReconnectMax: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	deadline := time.Now().Add(3 * time.Second)
+	for srv.Calls("conversations.open") < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if c.DMChannel() != "" {
+		t.Fatalf("the wrong channel is in use: %q", c.DMChannel())
+	}
+	if _, err := c.SendMessage(context.Background(), ChatID, telegram.Message{Text: "secret"}); err == nil || len(srv.Posted()) != 0 {
+		t.Fatalf("something was written to a channel that is not the user's: %v %v", err, srv.Posted())
+	}
+	if srv.Connected() {
+		t.Fatal("the socket was opened with settings that are wrong")
+	}
+	if !strings.Contains(buf.String(), "not the direct message with the configured user") {
+		t.Fatalf("the cause was not logged:\n%s", buf.String())
+	}
+}
+
+func TestWithoutTheRightToOpenAChatTheConfiguredChannelIsUsedAndTheLogSaysSo(t *testing.T) {
+	srv := slacktest.New(t)
+	srv.FailNext("conversations.open", "missing_scope")
+	buf := &syncBuf{}
+	c, _ := New(Config{BotToken: slacktest.BotToken, AppToken: slacktest.AppToken, UserID: slacktest.UserID, APIBase: srv.APIURL(), ChannelID: slacktest.Channel,
+		Log: slog.New(slog.NewJSONHandler(buf, nil)), ReconnectMin: 10 * time.Millisecond, ReconnectMax: 20 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	srv.WaitConnected(t, 5*time.Second)
+	if c.DMChannel() != slacktest.Channel || !strings.Contains(buf.String(), "no im:write right") {
+		t.Fatalf("%q\n%s", c.DMChannel(), buf.String())
 	}
 }
 
@@ -149,6 +192,10 @@ func TestBadSettingsAreRefusedBeforeAnyRequest(t *testing.T) {
 		"a channel as the user":  func(c *Config) { c.UserID = "C0123ABCD" },
 		"a public channel":       func(c *Config) { c.ChannelID = "C0123ABCD" },
 		"plain http":             func(c *Config) { c.APIBase = "http://slack.example.com/api" },
+		"another https host":     func(c *Config) { c.APIBase = "https://evil.example.com/api" },
+		"a lookalike host":       func(c *Config) { c.APIBase = "https://slack.com.evil.example/api" },
+		"a host that ends alike": func(c *Config) { c.APIBase = "https://evilslack.com/api" },
+		"a loopback look-alike":  func(c *Config) { c.APIBase = "http://localhost.evil.example/api" },
 		"a bad scheme":           func(c *Config) { c.APIBase = "ftp://slack.com/api" },
 		"credentials in the url": func(c *Config) { c.APIBase = "https://user:pw@slack.com/api" },
 		"a bad prefix":           func(c *Config) { c.CommandPrefix = "Bad Prefix" },
@@ -243,17 +290,16 @@ func TestOnlyTheAllowedUserInTheAllowedChatIsObeyed(t *testing.T) {
 func TestEventsThatAreNotANewMessageOfAPersonAreIgnored(t *testing.T) {
 	r := newRig(t, nil)
 	for name, m := range map[string]slacktest.Msg{
-		"the bot's own message":   {User: slacktest.BotUser, Text: "echo"},
-		"a bot message":           {BotID: "B0OTHER01", Text: "from a bot"},
-		"an edit":                 {Subtype: "message_changed", Text: "edited"},
-		"a deletion":              {Subtype: "message_deleted", Text: "deleted"},
-		"a join":                  {Subtype: "channel_join", Text: "joined"},
-		"a message in a channel":  {ChannelType: "channel", Channel: "C0PUBLIC01", Text: "public"},
-		"a group message":         {ChannelType: "group", Channel: "G0PRIVATE1", Text: "private"},
-		"an empty message":        {Text: ""},
-		"a bad timestamp":         {TS: "not-a-ts", Text: "bad"},
-		"a reminder or workflow":  {Subtype: "reminder_add", Text: "remind"},
-		"a thread broadcast copy": {Subtype: "thread_broadcast", Text: "broadcast"},
+		"the bot's own message":  {User: slacktest.BotUser, Text: "echo"},
+		"a bot message":          {BotID: "B0OTHER01", Text: "from a bot"},
+		"an edit":                {Subtype: "message_changed", Text: "edited"},
+		"a deletion":             {Subtype: "message_deleted", Text: "deleted"},
+		"a join":                 {Subtype: "channel_join", Text: "joined"},
+		"a message in a channel": {ChannelType: "channel", Channel: "C0PUBLIC01", Text: "public"},
+		"a group message":        {ChannelType: "group", Channel: "G0PRIVATE1", Text: "private"},
+		"an empty message":       {Text: ""},
+		"a bad timestamp":        {TS: "not-a-ts", Text: "bad"},
+		"a reminder or workflow": {Subtype: "reminder_add", Text: "remind"},
 	} {
 		_ = name
 		r.srv.Say(m)
@@ -444,7 +490,7 @@ func TestMarkdownIsShownAsSlackFormatting(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := r.srv.Posted()[0].Text
-	for _, want := range []string{"*bold*", "`code`", "<https://example.com|a link>"} {
+	for _, want := range []string{"*bold*", "`code`", "<https://example.com|a link (example.com)>"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("%q does not hold %q", got, want)
 		}
@@ -924,4 +970,332 @@ func TestAHistoryThatFailsDoesNotKeepTheSocketFromBeingRead(t *testing.T) {
 		t.Fatalf("%+v", u)
 	}
 	r.eventually("the warning", func() bool { return strings.Contains(r.log.String(), "could not read back") })
+}
+
+func TestAThreadReplyAlsoSentToTheChannelIsTheUsersWordsAndNamesItsParent(t *testing.T) {
+	r := newRig(t, nil)
+	parent, _ := r.srv.Say(slacktest.Msg{Text: "first"})
+	r.next()
+	r.srv.Say(slacktest.Msg{Text: "broadcast answer", Subtype: "thread_broadcast", ThreadTS: parent})
+	u := r.next()
+	if u.Text != "broadcast answer" || u.ReplyToID != mustID(t, parent) || u.UserID != UserID {
+		t.Fatalf("%+v", u)
+	}
+}
+
+func TestEventsWithIdsThatAreNotIdsAreIgnoredAndLeaveNoKeyBehind(t *testing.T) {
+	r := newRig(t, nil)
+	big := strings.Repeat("D", 500000)
+	for i, ev := range []map[string]any{
+		{"type": "message", "channel": big, "channel_type": "im", "user": slacktest.UserID, "text": "x", "ts": "1700000003.000001"},
+		{"type": "message", "channel": slacktest.Channel, "channel_type": "im", "user": big, "text": "x", "ts": "1700000003.000002"},
+		{"type": "message", "channel": "d lowercase", "channel_type": "im", "user": slacktest.UserID, "text": "x", "ts": "1700000003.000003"},
+	} {
+		r.srv.SayRaw("EvBad"+itoaN(i), "", ev)
+	}
+	r.srv.Tap(slacktest.UserID, slacktest.Channel, "1700000003.000004", "v", big)
+	r.srv.Tap(slacktest.UserID, slacktest.Channel, "1700000003.000004", "v", "bad trigger!")
+	r.srv.Slash(slacktest.UserID, slacktest.Channel, "/pb-key", "2", big)
+	r.srv.Slash(slacktest.UserID, slacktest.Channel, "/pb-key", "2", "")
+	r.quiet(300 * time.Millisecond)
+	r.c.mu.Lock()
+	n := len(r.c.seen)
+	r.c.mu.Unlock()
+	if n != 0 || r.c.Strangers() != 0 {
+		t.Fatalf("%d keys, %d strangers", n, r.c.Strangers())
+	}
+}
+
+func TestStrangersDoNotPushTheUsersKeysOutOfTheDedupRing(t *testing.T) {
+	r := newRig(t, nil)
+	ev := map[string]any{"type": "message", "channel": slacktest.Channel, "channel_type": "im", "user": slacktest.UserID, "team": slacktest.Team, "text": "once", "ts": "1700000009.000100"}
+	r.srv.SayRaw("EvOnce", "env-first", ev)
+	if u := r.next(); u.Text != "once" {
+		t.Fatalf("%+v", u)
+	}
+	for i := 0; i < 2300; i++ {
+		r.c.push("m:D0STRANGER:"+itoaN(100000+i), telegram.Update{ChatID: 999, UserID: 999, Text: "-"})
+	}
+	r.srv.SayRaw("EvOnce", "env-retry", ev) // Slack sends the event again, long after
+	time.Sleep(300 * time.Millisecond)
+	ups, _ := r.c.GetUpdates(context.Background(), r.offset, 50*time.Millisecond)
+	for _, u := range ups {
+		if u.ChatID == ChatID && u.UserID == UserID {
+			t.Fatalf("the event was handled twice: %+v", u)
+		}
+	}
+}
+
+func TestAGapLongerThanAPageIsReadBackInPagesAndInOrder(t *testing.T) {
+	old := backfillPage
+	backfillPage = 4
+	t.Cleanup(func() { backfillPage = old })
+	r := newRig(t, nil)
+	r.srv.Say(slacktest.Msg{Text: "before"})
+	r.next()
+	r.srv.DropSocket()
+	var want []string
+	for i := 0; i < 10; i++ {
+		text := "missed " + itoaN(i)
+		want = append(want, text)
+		r.srv.SayMissed(slacktest.Msg{Text: text})
+	}
+	r.srv.WaitConnected(t, 5*time.Second)
+	ups := r.updates(10, 5*time.Second)
+	for i, u := range ups {
+		if u.Text != want[i] {
+			t.Fatalf("update %d is %q, want %q", i, u.Text, want[i])
+		}
+	}
+	r.quiet(200 * time.Millisecond)
+}
+
+func TestAGapLongerThanAllThePagesIsSaidInTheLog(t *testing.T) {
+	old := backfillPage
+	backfillPage = 1
+	t.Cleanup(func() { backfillPage = old })
+	r := newRig(t, nil)
+	r.srv.Say(slacktest.Msg{Text: "before"})
+	r.next()
+	r.srv.DropSocket()
+	for i := 0; i < backfillPages+3; i++ {
+		r.srv.SayMissed(slacktest.Msg{Text: "missed " + itoaN(i)})
+	}
+	r.srv.WaitConnected(t, 5*time.Second)
+	r.updates(backfillPages, 5*time.Second)
+	r.eventually("the warning", func() bool { return strings.Contains(r.log.String(), "than could be read back") })
+}
+
+// ---- regression cases ----
+
+func TestASlackThatKeepsAskingForANewConnectionIsNotAskedBackInATightLoop(t *testing.T) {
+	srv := slacktest.New(t)
+	srv.DisconnectOnHello = true
+	c, _ := New(Config{BotToken: slacktest.BotToken, AppToken: slacktest.AppToken, UserID: slacktest.UserID, APIBase: srv.APIURL(),
+		ReconnectMin: 100 * time.Millisecond, ReconnectMax: 400 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	time.Sleep(1500 * time.Millisecond)
+	// waits of 100, 200, 400, 400, ... ms: about eight connections in a second and a half, not thousands
+	if n := srv.Opens(); n < 3 || n > 15 {
+		t.Fatalf("%d connections in 1.5 s", n)
+	}
+}
+
+func TestAHubThatCannotReachSlackIsNotReadyAndSaysSo(t *testing.T) {
+	srv := slacktest.New(t)
+	api := srv.APIURL()
+	srv.HTTP.Close() // nothing answers
+	c, _ := New(Config{BotToken: slacktest.BotToken, AppToken: slacktest.AppToken, UserID: slacktest.UserID, APIBase: api,
+		ReconnectMin: 20 * time.Millisecond, ReconnectMax: 40 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	if _, err := c.GetUpdates(context.Background(), 0, 150*time.Millisecond); err == nil || !strings.Contains(err.Error(), "no Socket Mode connection yet") {
+		t.Fatalf("a poll with no socket at all passed: %v", err)
+	}
+	// the poll that only confirms (no waiting) is no failure, so that a stopping hub does not complain
+	if _, err := c.GetUpdates(context.Background(), 5, 0); err != nil {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestAHubWithWrongTokensIsNotReady(t *testing.T) {
+	srv := slacktest.New(t)
+	c, _ := New(Config{BotToken: "xoxb-9999999999-wrongtoken", AppToken: slacktest.AppToken, UserID: slacktest.UserID, APIBase: srv.APIURL(),
+		ReconnectMin: 20 * time.Millisecond, ReconnectMax: 40 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	if _, err := c.GetUpdates(context.Background(), 0, 200*time.Millisecond); err == nil {
+		t.Fatal("a hub with a bot token Slack refuses looks ready")
+	}
+	if srv.Connected() {
+		t.Fatal("a socket was opened")
+	}
+}
+
+func TestButtonsOfAMarkdownMessageAreNotParsedBySlackAndAPlainOnesAreNotMarkdown(t *testing.T) {
+	r := newRig(t, nil)
+	rows := [][]telegram.Button{{{Text: "ok", Data: "ok"}}}
+	r.c.SendMessage(context.Background(), ChatID, telegram.Message{Text: "a **bold** word", Markdown: true, Buttons: rows})
+	r.c.SendMessage(context.Background(), ChatID, telegram.Message{Text: "a *star* word", Buttons: rows})
+	p := r.srv.Posted()
+	if !strings.Contains(p[0].Blocks, `"verbatim":true`) || !strings.Contains(p[0].Blocks, `"type":"mrkdwn"`) {
+		t.Fatalf("a mrkdwn block lets Slack parse names and links by itself: %s", p[0].Blocks)
+	}
+	if !strings.Contains(p[1].Blocks, `"type":"plain_text"`) || strings.Contains(p[1].Blocks, "verbatim") {
+		t.Fatalf("%s", p[1].Blocks)
+	}
+}
+
+func TestAMessageWhoseButtonsSlackRefusesIsSentWithoutThemAndSaysSo(t *testing.T) {
+	r := newRig(t, nil)
+	r.srv.FailNext("chat.postMessage", "invalid_blocks")
+	ids, err := r.c.SendMessage(context.Background(), ChatID, telegram.Message{Text: "Allow this command?", Buttons: [][]telegram.Button{{{Text: "Yes", Data: "y"}}}})
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("%v %v", ids, err)
+	}
+	p := r.srv.Posted()
+	if len(p) != 1 || p[0].Blocks != "" || !strings.Contains(p[0].Text, "Allow this command?") || !strings.Contains(p[0].Text, "buttons could not be shown") {
+		t.Fatalf("%+v", p)
+	}
+	// a refusal that is not about the blocks is still a refusal
+	r.srv.FailNext("chat.postMessage", "msg_too_long")
+	if _, err := r.c.SendMessage(context.Background(), ChatID, telegram.Message{Text: "x"}); err == nil {
+		t.Fatal("a refusal was swallowed")
+	}
+}
+
+func TestAnAnswerThatIsNotSlacksOwnIsToldByItsHTTPStatus(t *testing.T) {
+	r := newRig(t, nil)
+	for _, c := range []struct {
+		status int
+		body   string
+		want   int
+	}{{403, `{"message":"forbidden by the proxy"}`, 403}, {404, `{"ok":false}`, 404}, {408, `{"ok":false,"error":""}`, 408}, {502, `{"error":"bad gateway"}`, 502},
+		{401, `{"ok":false,"error":"something_new"}`, 401}} {
+		r.srv.AnswerNext("chat.postMessage", c.status, c.body)
+		_, err := r.c.SendMessage(context.Background(), ChatID, telegram.Message{Text: "x"})
+		var ae *telegram.APIError
+		if !errors.As(err, &ae) || ae.Code != c.want {
+			t.Errorf("%d %s: %v", c.status, c.body, err)
+		}
+	}
+	// Slack's own answer with a code nobody knows, on HTTP 200: this request is wrong, as before
+	r.srv.FailNext("chat.postMessage", "something_new")
+	_, err := r.c.SendMessage(context.Background(), ChatID, telegram.Message{Text: "x"})
+	var ae *telegram.APIError
+	if !errors.As(err, &ae) || ae.Code != 400 {
+		t.Errorf("%v", err)
+	}
+}
+
+func TestOnlyHttpsAddressesOnTheNamedSlackHostsAreTrusted(t *testing.T) {
+	c, err := New(Config{BotToken: slacktest.BotToken, AppToken: slacktest.AppToken, UserID: slacktest.UserID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for url, want := range map[string]bool{
+		"https://files.slack.com/files-pri/T0123456789-F0123456789/download/x": true,
+		"https://files.slack.com:443/x":                                        true,
+		"http://files.slack.com/x":                                             false,
+		"https://other.slack.com/x":                                            false,
+		"https://files.slack.com.evil.example/x":                               false,
+		"https://evilfiles.slack.com/x":                                        false,
+		"https://files.slack.com:444/x":                                        false,
+		"https://user:pw@files.slack.com/x":                                    false,
+		"https://files.slack.com/x#frag":                                       false,
+		"ftp://files.slack.com/x":                                              false,
+		"https://files.slack.com./x":                                           false,
+		"":                                                                     false,
+	} {
+		if _, ok := c.trustedHTTP(url, "files.slack.com"); ok != want {
+			t.Errorf("%q: %v", url, ok)
+		}
+	}
+	if _, ok := c.trustedHTTP("https://hooks.slack.com/actions/T/1/x", "hooks.slack.com"); !ok {
+		t.Error("the response address")
+	}
+	for url, want := range map[string]bool{"wss://wss-primary.slack.com/link/?ticket=x": true, "wss://wss-backup.slack.com/link/?ticket=x": true,
+		"ws://wss-primary.slack.com/link/?ticket=x": false, "https://wss-primary.slack.com/link": false, "wss://evil.example/link": false, "wss://slack.com.evil.example/": false} {
+		if _, ok := c.trustedSocket(url); ok != want {
+			t.Errorf("%q: %v", url, ok)
+		}
+	}
+}
+
+func TestAShortDownloadIsNotPassedOnAsTheFile(t *testing.T) {
+	r := newRig(t, nil)
+	r.srv.AddFile("F0SHORT001", []byte("abc"), map[string]any{"size": 100})
+	_, err := r.c.Fetch(context.Background(), telegram.FileRef{ID: "F0SHORT001"}, 1000)
+	var ae *telegram.APIError
+	if !errors.As(err, &ae) || ae.Code != 502 {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestAFileStaysSentWhenOnlyItsButtonsCouldNotBeShown(t *testing.T) {
+	r := newRig(t, nil)
+	r.srv.FailNext("chat.postMessage", "internal_error")
+	ids, err := r.c.SendFile(context.Background(), ChatID, telegram.OutFile{Name: "a.txt", Data: []byte("x"), Buttons: [][]telegram.Button{{{Text: "delete", Data: "d"}}}})
+	if err != nil || ids != nil || len(r.srv.Uploads()) != 1 {
+		t.Fatalf("%v %v %d", ids, err, len(r.srv.Uploads()))
+	}
+	if !strings.Contains(r.log.String(), "buttons of a file could not be shown") {
+		t.Fatal("not logged")
+	}
+}
+
+func TestInvisibleCharactersAreNotKeptInAFileName(t *testing.T) {
+	for in, want := range map[string]string{
+		"report\u202etxt.exe":    "reporttxt.exe",
+		"a\u200bb\u200ec.txt":    "abc.txt",
+		"x\u2028y\u2029z":        "xyz",
+		"soft\u00adhyphen.md":    "softhyphen.md",
+		"\ufeffbom.txt":          "bom.txt",
+		"\u2066iso\u2069.txt":    "iso.txt",
+		"../../etc/passwd":       "passwd",
+		"..\\..\\windows\\x.ini": "x.ini",
+		"\u202e":                 "file",
+		"..":                     "file",
+		"   ":                    "file",
+		"tab\there\x00.txt":      "tabhere.txt",
+	} {
+		if got := fileName(in); got != want {
+			t.Errorf("%q -> %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestTwoMessagesWrittenAtTheSameTimeGoOutOneAfterTheOther(t *testing.T) {
+	r := newRig(t, nil)
+	text := func(tag string) string {
+		var b strings.Builder
+		for i := 0; i < 400; i++ {
+			b.WriteString(tag + " line " + itoaN(i) + " " + strings.Repeat("x", 20) + "\n")
+		}
+		return b.String()
+	}
+	var wg sync.WaitGroup
+	for _, tag := range []string{"A", "B", "C"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := r.c.SendMessage(context.Background(), ChatID, telegram.Message{Text: text(tag)}); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	posted := r.srv.Posted()
+	if len(posted) < 9 {
+		t.Fatalf("%d messages", len(posted))
+	}
+	var order []string
+	for _, p := range posted {
+		tag := p.Text[:1]
+		if len(order) == 0 || order[len(order)-1] != tag {
+			order = append(order, tag)
+		}
+	}
+	if len(order) != 3 {
+		t.Fatalf("the parts of the messages were mixed: %v", order)
+	}
+}
+
+func TestAnErrorCodeThatLooksLikeATokenIsNotCopiedIntoErrorsOrLogs(t *testing.T) {
+	r := newRig(t, nil)
+	r.srv.FailNext("chat.postMessage", "oops "+slacktest.BotToken)
+	_, err := r.c.SendMessage(context.Background(), ChatID, telegram.Message{Text: "x"})
+	if err == nil || strings.Contains(err.Error(), slacktest.BotToken) || strings.Contains(err.Error(), "xoxb") {
+		t.Fatalf("%v", err)
+	}
+	if got := safeWord("XAPP-1-secret"); got != "redacted" {
+		t.Fatalf("%q", got)
+	}
 }

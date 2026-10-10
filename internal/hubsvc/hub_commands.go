@@ -17,9 +17,9 @@ func ChatCommands() []telegram.Command {
 		{Name: "down", Description: "Press the Down arrow in the session"},
 		{Name: "tab", Description: "Press Tab in the session"},
 		{Name: "key", Description: "Press a key by number or name: /key 2, /key btab"},
-		{Name: "clear", Description: "Type /clear into the session"},
-		{Name: "compact", Description: "Type /compact into the session"},
-		{Name: "resume", Description: "Type /resume into the session"},
+		{Name: "clear", Description: "Clear the session: types Claude Code's own clear command"},
+		{Name: "compact", Description: "Compact the session: types Claude Code's own compact command"},
+		{Name: "resume", Description: "Resume an older session: types Claude Code's own resume command"},
 		{Name: "continue", Description: "Start Claude Code again on the machine; /continue NAME for one agent"},
 	} {
 		if !have[c.Name] {

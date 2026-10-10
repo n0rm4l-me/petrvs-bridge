@@ -18,7 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/n0rm4l-me/petrvs-bridge/internal/identity"
-	"github.com/n0rm4l-me/petrvs-bridge/internal/slack"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/slack/slackid"
 )
 
 // Common settings shared by hub and agent.
@@ -254,6 +254,16 @@ func checkReaction(e *env, key, v string) string {
 	return v
 }
 
+// reactionRefused says that checkReaction already complained about the setting, so that it is not complained about twice.
+func reactionRefused(e *env, key string) bool {
+	for _, m := range e.err {
+		if strings.HasPrefix(m, key+":") {
+			return true
+		}
+	}
+	return false
+}
+
 // checkTelegramBase refuses a Bot API address that would send the bot token over plain HTTP to another machine.
 func checkTelegramBase(e *env, base string) {
 	u, err := url.Parse(base)
@@ -347,7 +357,7 @@ func ParseHub(args []string, getenv func(string) string) (*Hub, error) {
 	fs.StringVar(&h.Chat, "chat", e.str("PB_CHAT", "telegram"), "the chat service: telegram or slack (env PB_CHAT)")
 	fs.StringVar(&h.SlackUserID, "slack-user", e.str("PB_SLACK_USER_ID", ""), "Slack: the only user that is obeyed, like U0123ABCD (env PB_SLACK_USER_ID)")
 	fs.StringVar(&h.SlackChannelID, "slack-channel", e.str("PB_SLACK_CHANNEL_ID", ""), "Slack: the direct message of that user with the app, like D0123ABCD; unset means the hub asks Slack, which needs the im:write right (env PB_SLACK_CHANNEL_ID)")
-	fs.StringVar(&h.SlackAPIBase, "slack-api", e.str("PB_SLACK_API_BASE", slack.DefaultAPIBase), "Slack: the Web API address; change it only for a test double (env PB_SLACK_API_BASE)")
+	fs.StringVar(&h.SlackAPIBase, "slack-api", e.str("PB_SLACK_API_BASE", slackid.DefaultAPIBase), "Slack: the Web API address; change it only for a test double (env PB_SLACK_API_BASE)")
 	fs.StringVar(&h.SlackCommandPrefix, "slack-command-prefix", e.str("PB_SLACK_COMMAND_PREFIX", "pb-"), "Slack: the prefix of the app's slash commands, so that /pb-status reaches the hub as /status (env PB_SLACK_COMMAND_PREFIX)")
 	fs.StringVar(&h.TelegramBase, "telegram-api", e.str("PB_TELEGRAM_API_BASE", "https://api.telegram.org"), "Bot API base URL (env PB_TELEGRAM_API_BASE)")
 	fs.Int64Var(&h.ChatID, "chat-id", e.int64("PB_CHAT_ID"), "the only chat that is obeyed (env PB_CHAT_ID)")
@@ -373,9 +383,9 @@ func ParseHub(args []string, getenv func(string) string) (*Hub, error) {
 	h.DeliveredReaction = checkReaction(e, "PB_DELIVERED_REACTION", *delivered)
 	h.FailedReaction = checkReaction(e, "PB_FAILED_REACTION", *failed)
 	if h.Chat == "slack" {
-		for key, v := range map[string]string{"PB_RECEIVED_REACTION": h.ReceivedReaction, "PB_DELIVERED_REACTION": h.DeliveredReaction, "PB_FAILED_REACTION": h.FailedReaction} {
-			if _, ok := slack.ReactionName(v); v != "" && !ok {
-				e.err = append(e.err, fmt.Sprintf("%s: %q has no name in Slack; use one of %s, or off", key, v, strings.Join(slack.Reactions(), " ")))
+		for _, r := range []struct{ key, val string }{{"PB_RECEIVED_REACTION", h.ReceivedReaction}, {"PB_DELIVERED_REACTION", h.DeliveredReaction}, {"PB_FAILED_REACTION", h.FailedReaction}} {
+			if _, ok := slackid.ReactionName(r.val); r.val != "" && !ok && !reactionRefused(e, r.key) {
+				e.err = append(e.err, fmt.Sprintf("%s: %q has no name in Slack; use one of %s, or off", r.key, r.val, strings.Join(slackid.Reactions(), " ")))
 			}
 		}
 	}
@@ -429,19 +439,19 @@ func (h *Hub) parseTelegram(e *env, getenv func(string) string) {
 // parseSlack checks what the hub needs to talk to Slack: two tokens (from the environment or from private files, never a flag),
 // the one user that is obeyed and, optionally, the direct message with the app.
 func (h *Hub) parseSlack(e *env, getenv func(string) string) {
-	h.ChatID, h.UserID = slack.ChatID, slack.UserID // the client keeps the one chat and the one user under these numbers
-	if !slack.ValidUserID(h.SlackUserID) {
+	h.ChatID, h.UserID = slackid.ChatID, slackid.UserID // the client keeps the one chat and the one user under these numbers
+	if !slackid.ValidUserID(h.SlackUserID) {
 		e.err = append(e.err, "slack-user: set PB_SLACK_USER_ID to the id of the one user that is obeyed, like U0123ABCD")
 	}
-	if h.SlackChannelID != "" && !slack.ValidChannelID(h.SlackChannelID) {
+	if h.SlackChannelID != "" && !slackid.ValidChannelID(h.SlackChannelID) {
 		e.err = append(e.err, "slack-channel: the id of the direct message, like D0123ABCD")
 	}
-	h.SlackBotToken = slackToken(e, getenv, "SLACK_BOT_TOKEN", "PB_SLACK_BOT_TOKEN_FILE", h.AllowGroupRead, slack.ValidBotToken, "xoxb-")
-	h.SlackAppToken = slackToken(e, getenv, "SLACK_APP_TOKEN", "PB_SLACK_APP_TOKEN_FILE", h.AllowGroupRead, slack.ValidAppToken, "xapp-")
-	if !slack.ValidAPIBase(h.SlackAPIBase) {
+	h.SlackBotToken = slackToken(e, getenv, "SLACK_BOT_TOKEN", "PB_SLACK_BOT_TOKEN_FILE", h.AllowGroupRead, slackid.ValidBotToken, "xoxb-")
+	h.SlackAppToken = slackToken(e, getenv, "SLACK_APP_TOKEN", "PB_SLACK_APP_TOKEN_FILE", h.AllowGroupRead, slackid.ValidAppToken, "xapp-")
+	if !slackid.ValidAPIBase(h.SlackAPIBase) {
 		e.err = append(e.err, "slack-api: an https URL (plain http only for localhost)")
 	}
-	if !slack.ValidCommandPrefix(h.SlackCommandPrefix) {
+	if !slackid.ValidCommandPrefix(h.SlackCommandPrefix) {
 		e.err = append(e.err, "slack-command-prefix: lower-case letters, digits, - and _, at most 10 characters")
 	}
 }

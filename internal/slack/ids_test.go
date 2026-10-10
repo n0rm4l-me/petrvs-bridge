@@ -1,9 +1,12 @@
 package slack
 
 import (
+	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/n0rm4l-me/petrvs-bridge/internal/slack/slackid"
 )
 
 func TestTimestampsTurnIntoIdsAndBack(t *testing.T) {
@@ -91,5 +94,16 @@ func TestEveryReactionTheHubMayUseHasAName(t *testing.T) {
 	}
 	if len(Reactions()) < 10 {
 		t.Error("the list of reactions is short")
+	}
+}
+
+func TestTheNamesOfTheMarksAreTheOnesSlackKnows(t *testing.T) {
+	want := "100 cry eyes fire handshake heart hourglass_flowing_sand inbox_tray incoming_envelope ok ok_hand octagonal_sign pray rocket scream see_no_evil " +
+		"tada thinking_face thumbsdown thumbsup warning white_check_mark x zap clap"
+	got := strings.Join(slackid.ReactionNames(), " ")
+	w := strings.Fields(want)
+	sort.Strings(w)
+	if got != strings.Join(w, " ") {
+		t.Fatalf("the table of marks changed:\n got  %s\n want %s", got, strings.Join(w, " "))
 	}
 }

@@ -3,6 +3,8 @@ package slack
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/n0rm4l-me/petrvs-bridge/internal/telegram"
@@ -25,11 +27,22 @@ func Manifest(name, prefix string, cmds []telegram.Command) ([]byte, error) {
 		ShouldEscape bool   `json:"should_escape"`
 	}
 	var slash []command
+	var names []string
 	for _, c := range cmds {
 		if !slashNameRe.MatchString(prefix + c.Name) {
 			return nil, fmt.Errorf("slack: %q is not a name Slack allows for a command", prefix+c.Name)
 		}
-		slash = append(slash, command{Command: "/" + prefix + c.Name, Description: cutRunes(strings.TrimSpace(c.Description), 200), ShouldEscape: false})
+		names = append(names, regexp.QuoteMeta(c.Name))
+	}
+	// The descriptions name other commands ("/alarm on", "/key 2"): in Slack those carry the prefix too.
+	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
+	named := regexp.MustCompile(`(^|[^A-Za-z0-9_/])/(` + strings.Join(names, "|") + `)\b`)
+	for _, c := range cmds {
+		desc := strings.TrimSpace(c.Description)
+		if len(names) > 0 {
+			desc = named.ReplaceAllString(desc, "${1}/"+prefix+"${2}")
+		}
+		slash = append(slash, command{Command: "/" + prefix + c.Name, Description: cutRunes(desc, 200), ShouldEscape: false})
 	}
 	m := map[string]any{
 		"display_information": map[string]any{

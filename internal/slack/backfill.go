@@ -3,6 +3,7 @@ package slack
 import (
 	"context"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -16,8 +17,18 @@ import (
 // what the user wrote while it was down is lost, where Telegram would have kept it. (Replaying old messages after a restart would
 // be worse: a command could run twice.)
 
-// backfillTimeout bounds the reading back, so that a slow history cannot keep the socket from being read.
-const backfillTimeout = 10 * time.Second
+// backfillTimeout bounds the reading back, so that a slow history cannot keep the socket from being read. backfillPage is how many
+// messages one call asks for, and backfillPages how many calls are made at most; a variable so that a test can make it small.
+const (
+	backfillTimeout = 10 * time.Second
+	backfillPages   = 5
+)
+
+var backfillPage = 100
+
+// What this does not read: a reply in a thread is not in the history of the channel (the history holds the messages that are not
+// replies), so a reply written to an older thread while the socket was closed is lost, and so is one written to a newer one that
+// was not also sent to the channel. A reply that was also sent to the channel is read as any message.
 
 // heard notes the newest message of the allowed user that this client has seen.
 func (c *Client) heard(id int64, ts string) {
@@ -28,7 +39,8 @@ func (c *Client) heard(id int64, ts string) {
 	}
 }
 
-// backfill reads the messages written after the last one heard of.
+// backfill reads the messages written after the last one heard of: as many pages as it takes, up to backfillPages, newest first, and
+// then hands them on oldest first.
 func (c *Client) backfill(parent context.Context) {
 	c.mu.Lock()
 	ch, last := c.channel, c.lastTS
@@ -38,25 +50,43 @@ func (c *Client) backfill(parent context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(parent, backfillTimeout)
 	defer cancel()
-	var h struct {
-		reply
-		Messages []messageEvent `json:"messages"` // the newest first
-	}
-	params := url.Values{"channel": {ch}, "oldest": {last}, "inclusive": {"false"}, "limit": {"100"}}
-	if err := c.callRetry(ctx, "conversations.history", c.cfg.BotToken, params, &h); err != nil {
-		if parent.Err() == nil {
-			c.log.Warn("could not read back what was written while the socket was closed", "err", err)
+	var all []messageEvent // the newest first
+	cursor, more := "", false
+	for page := 0; page < backfillPages; page++ {
+		var h struct {
+			reply
+			Messages []messageEvent `json:"messages"`
+			HasMore  bool           `json:"has_more"`
+			Meta     struct {
+				Next string `json:"next_cursor"`
+			} `json:"response_metadata"`
 		}
-		return
+		params := url.Values{"channel": {ch}, "oldest": {last}, "inclusive": {"false"}, "limit": {strconv.Itoa(backfillPage)}}
+		if cursor != "" {
+			params.Set("cursor", cursor)
+		}
+		if err := c.callRetry(ctx, "conversations.history", c.cfg.BotToken, params, &h); err != nil {
+			if parent.Err() == nil {
+				c.log.Warn("could not read back what was written while the socket was closed", "err", err)
+			}
+			break
+		}
+		all = append(all, h.Messages...)
+		cursor, more = h.Meta.Next, h.HasMore
+		if !more || cursor == "" {
+			more = false
+			break
+		}
 	}
-	n := 0
-	for i := len(h.Messages) - 1; i >= 0; i-- {
-		m := h.Messages[i]
+	if more {
+		c.log.Warn("more was written while the socket was closed than could be read back; the oldest of it was not", "read", len(all))
+	}
+	for i := len(all) - 1; i >= 0; i-- {
+		m := all[i]
 		m.Type, m.Channel, m.ChannelType = "message", ch, "im"
 		c.message(m, "")
-		n++
 	}
-	if n > 0 {
-		c.log.Info("read back messages written while the socket was closed", "messages", n)
+	if len(all) > 0 {
+		c.log.Info("read back messages written while the socket was closed", "messages", len(all))
 	}
 }

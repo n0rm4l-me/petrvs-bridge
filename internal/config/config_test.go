@@ -2,15 +2,18 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/n0rm4l-me/petrvs-bridge/internal/approval"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/slack/slackid"
 )
 
 func envOf(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
@@ -683,5 +686,72 @@ func TestSlackReactionsOfTheTable(t *testing.T) {
 	e["PB_RECEIVED_REACTION"], e["PB_DELIVERED_REACTION"], e["PB_FAILED_REACTION"] = "👍", "✅", "off"
 	if h, err := ParseHub(nil, envOf(e)); err != nil || h.ReceivedReaction != "👍" || h.FailedReaction != "" {
 		t.Fatalf("%v %+v", err, h)
+	}
+}
+
+// The chart refuses what the hub would refuse, so that a pod does not start only to stop at once: the patterns of the schema
+// and the checks of the hub must agree.
+func TestTheChartSchemaAgreesWithTheChecksOfTheHub(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/helm/petrvs-bridge-hub/values.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties struct {
+			Slack struct {
+				Properties map[string]struct {
+					Pattern string `json:"pattern"`
+				} `json:"properties"`
+			} `json:"slack"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	for field, check := range map[string]func(string) bool{
+		"userId": slackid.ValidUserID, "channelId": slackid.ValidChannelID, "commandPrefix": slackid.ValidCommandPrefix, "apiBase": slackid.ValidAPIBase,
+	} {
+		pattern := schema.Properties.Slack.Properties[field].Pattern
+		if pattern == "" {
+			t.Fatalf("no pattern for slack.%s", field)
+		}
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			t.Fatalf("slack.%s: %v", field, err)
+		}
+		for _, in := range []string{"U0123ABCD", "W0123ABCD", "U12", "u0123abcd", "C0123ABCD", "D0123ABCD", "D0123ABCD ", "pb-", "pb", "Pb-", "a b", "x_y-z",
+			"https://slack.com/api", "https://eu.slack.com/api", "https://evil.example.com/api", "https://slack.com.evil.example/api", "https://evilslack.com/api",
+			"http://localhost:8080/api", "http://127.0.0.1:9/api", "http://localhost.evil.example/api", "http://localhostevil.com/api", "ftp://slack.com/api"} {
+			if in == "" {
+				continue
+			}
+			if got, want := re.MatchString(in), check(in); got != want {
+				t.Errorf("slack.%s %q: the chart says %v, the hub says %v", field, in, got, want)
+			}
+		}
+	}
+}
+
+func TestAnInvalidReactionIsReportedOnceForSlackToo(t *testing.T) {
+	e := slackEnv()
+	e["PB_DELIVERED_REACTION"] = "yes"
+	_, err := ParseHub(nil, envOf(e))
+	if err == nil || strings.Count(err.Error(), "PB_DELIVERED_REACTION") != 1 {
+		t.Fatalf("%v", err)
+	}
+	e = slackEnv()
+	e["PB_DELIVERED_REACTION"] = "🦄"
+	e["PB_FAILED_REACTION"] = "🤡"
+	var first string
+	for i := 0; i < 5; i++ { // the order of the complaints and of the choices is the same every time
+		_, err := ParseHub(nil, envOf(e))
+		if err == nil {
+			t.Fatal("accepted")
+		}
+		if i == 0 {
+			first = err.Error()
+		} else if err.Error() != first {
+			t.Fatalf("the report changes from run to run:\n%s\n%s", first, err)
+		}
 	}
 }

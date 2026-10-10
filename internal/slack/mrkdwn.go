@@ -29,9 +29,6 @@ const (
 	mdWorkPerByte = 24   // ... so many times its own length: past that a line is no longer searched for formatting
 	mdMaxURL      = 2000 // bytes of an address that a link may have
 	mdMaxTitle    = 500  // bytes after the address of a link that may hold a title
-	mdMinSplit    = 128  // below this a piece cannot hold the reopening of a code block
-	mdMaxFence    = 16   // the longest fence that Split follows
-	mdMaxOpener   = 40   // the longest line that opens a code block, as Split writes it again
 )
 
 // The kinds of span that can be open, so that a second one of the same kind only drops its marks.
@@ -451,7 +448,38 @@ type mdConv struct{ left int }
 
 func mdLine(s string, f mdFlags) string {
 	c := &mdConv{left: mdWorkBase + mdWorkPerByte*len(s)}
-	return c.inline(s, f)
+	return mdBreakTicks(c.inline(s, f))
+}
+
+// mdBreakTicks takes apart every run of three or more backticks in a converted line. The converter never writes one on purpose
+// in a line of text (the fence of a code block is written by mdCodeBlock), but marks that drop out of the text can bring the
+// backticks on both sides of them together (` + "`**“a**`" + `: the two ** go, and "```a" is left), and Slack would open a code block there
+// that swallows the rest of the message.
+func mdBreakTicks(s string) string {
+	if !strings.Contains(s, "```") {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] != '`' {
+			j := strings.IndexByte(s[i:], '`')
+			if j < 0 {
+				b.WriteString(s[i:])
+				break
+			}
+			b.WriteString(s[i : i+j])
+			i += j
+			continue
+		}
+		n := mdRun(s, i, '`')
+		if n >= 3 {
+			b.WriteString(strings.Repeat("ˋ", n))
+		} else {
+			b.WriteString(s[i : i+n])
+		}
+		i += n
+	}
+	return b.String()
 }
 
 // limit is how far a search from `from` may read; pay charges for what was read.
@@ -810,9 +838,7 @@ func (c *mdConv) link(s string, code []int32, i int, f mdFlags) (out string, nex
 	if label == "" {
 		return "", 0, false
 	}
-	if mdLabelLies(text, dest) {
-		return "<" + url + ">", next, true // the address is shown, since the label would say another one
-	}
+	label = mdShowHost(label, dest)
 	return "<" + url + "|" + strings.ReplaceAll(label, "|", "¦") + ">", next, true
 }
 
@@ -908,126 +934,6 @@ func mdURL(u string) (string, bool) {
 		}
 	}
 	return strings.ReplaceAll(scheme+u[len(scheme):], "&", "&amp;"), true
-}
-
-// Split cuts Markdown into pieces of at most max bytes, at line breaks, so that each piece is Markdown of its own: a code
-// block that a cut falls in is closed at the end of the piece and opened again at the start of the next. A line longer than a
-// piece is cut inside, at a space outside a code block, never in the middle of a character.
-//
-// It does the work of tgfmt.Split, which it was checked against, but it keeps to max whatever the text is. tgfmt.Split goes past
-// max when a fence or the language after it is long (and then leaves a block open in the piece), goes past max when max is
-// below about 150, and does not stop at all when max is smaller than a character. The text here is not trusted. A line that
-// opens a block is shortened to mdMaxOpener bytes and a line that closes one is written as its fence, a fence longer than
-// mdMaxFence is not followed, and below mdMinSplit bytes a piece cannot hold the reopening of a block, so the text is cut as
-// plain text.
-func Split(src string, max int) []string {
-	if len(src) <= max {
-		if strings.TrimSpace(src) == "" {
-			return nil
-		}
-		return []string{src}
-	}
-	if max < mdMinSplit {
-		return SplitPlain(src, max)
-	}
-	var (
-		parts []string
-		cur   []string // the lines of the piece, the one that opens the block again among them
-		size  int      // their length in bytes, a line break counted after each
-		added int      // the lines in cur that are not the one that opens the block again
-		open  string   // the line that opened the code block we are in, "" outside one
-		mark  string   // and its fence
-	)
-	flush := func() {
-		if added > 0 {
-			text := strings.Join(cur, "\n")
-			if open != "" {
-				text += "\n" + mark
-			}
-			if strings.TrimSpace(strings.Trim(text, "`~\n")) != "" {
-				parts = append(parts, text)
-			}
-		}
-		cur, size, added = nil, 0, 0
-		if open != "" {
-			cur, size = []string{open}, len(open)+1
-		}
-	}
-	for _, l := range strings.Split(strings.ReplaceAll(src, "\r\n", "\n"), "\n") {
-		opens, closes := "", false
-		if open == "" {
-			if m := mdFence(l); m != "" && len(m) <= mdMaxFence {
-				opens = m
-				if len(l) > mdMaxOpener {
-					l = l[:mdCut(l, mdMaxOpener, true)]
-				}
-			}
-		} else if mdClosesFence(l, mark) {
-			closes, l = true, mark // whatever else the closing line holds, a fence is all that it means
-		}
-		limit := max // the bytes of lines that a piece can hold
-		switch {
-		case opens != "":
-			limit = max - len(opens) - 1
-		case open != "":
-			limit = max - len(mark) - 1
-		}
-		base := 0 // the size of a piece with nothing in it
-		if open != "" {
-			base = len(open) + 1
-		}
-		for size+len(l) > limit {
-			if added > 0 && base+len(l) <= limit {
-				flush() // the line fits in a piece of its own
-				break
-			}
-			if added > 0 && limit-size < limit/4 {
-				flush() // too little room left to be worth a piece
-				continue
-			}
-			cut := mdCut(l, limit-size, open != "")
-			cur = append(cur, l[:cut])
-			added++
-			flush()
-			l = l[cut:]
-		}
-		cur = append(cur, l)
-		size += len(l) + 1
-		added++
-		switch {
-		case opens != "":
-			open, mark = l, opens
-		case closes:
-			open, mark = "", ""
-		}
-	}
-	if added > 0 {
-		if text := strings.Join(cur, "\n"); strings.TrimSpace(text) != "" {
-			parts = append(parts, text)
-		}
-	}
-	return parts
-}
-
-// mdCut finds where to cut the line l so that the head is at most n bytes: not in the middle of a character, and outside code
-// at a space in the second half of it, so that a word is not cut when there is a place that does not cut one.
-func mdCut(l string, n int, inCode bool) int {
-	if n >= len(l) {
-		return len(l)
-	}
-	cut := n
-	for cut > 0 && !utf8.RuneStart(l[cut]) {
-		cut--
-	}
-	if cut == 0 {
-		return n // not text at all, bytes that are no character
-	}
-	if !inCode {
-		if k := strings.LastIndexByte(l[:cut], ' '); k >= cut/2 {
-			return k + 1
-		}
-	}
-	return cut
 }
 
 // SplitPlain cuts plain text into pieces of at most max bytes: at a line break where it can, otherwise at a space, otherwise

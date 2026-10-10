@@ -92,20 +92,20 @@ func TestMrkdwnInlineFormatting(t *testing.T) {
 		"~~**both**~~":                                 "~*both*~",
 		"a < b && c > d":                               "a &lt; b &amp;&amp; c &gt; d",
 		"escaped \\*stars\\* and \\<":                  "escaped *stars* and &lt;",
-		"[the docs](https://example.com/a?b=1&c=2)":    "<https://example.com/a?b=1&amp;c=2|the docs>",
-		"![pic](https://example.com/p.png)":            "<https://example.com/p.png|pic>",
+		"[the docs](https://example.com/a?b=1&c=2)":    "<https://example.com/a?b=1&amp;c=2|the docs (example.com)>",
+		"![pic](https://example.com/p.png)":            "<https://example.com/p.png|pic (example.com)>",
 		"[https://a.example](https://a.example)":       "<https://a.example>",
 		"[HTTPS://A.example/X](HTTPS://A.example/X)":   "<https://A.example/X>",
 		"mail [me](mailto:me@x.example)":               "mail <mailto:me@x.example|me>",
-		"[x](https://a.example/p \"a title\")":         "<https://a.example/p|x>",
-		"[w](https://en.wikipedia.org/wiki/Foo_(bar))": "<https://en.wikipedia.org/wiki/Foo_(bar)|w>",
-		"**see [docs](https://a.example)**":            "*see <https://a.example|docs>*",
-		"see [a](https://a.example), and [b](https://b.example/x_y_z).": "see <https://a.example|a>, and <https://b.example/x_y_z|b>.",
-		"[a [b] c](https://x.example)":                                  "<https://x.example|a [b] c>",
-		"[**bold** `code` _it_](https://x.example)":                     "<https://x.example|bold code it>",
-		"[a [b](https://y.example) c](https://x.example)":               "<https://x.example|a [b](https://y.example) c>",
-		"[a & b](https://x.example/?a=1&b=2)":                           "<https://x.example/?a=1&amp;b=2|a &amp; b>",
-		"[a](https://ok.example)<!channel>":                             "<https://ok.example|a>&lt;!channel&gt;",
+		"[x](https://a.example/p \"a title\")":         "<https://a.example/p|x (a.example)>",
+		"[w](https://en.wikipedia.org/wiki/Foo_(bar))": "<https://en.wikipedia.org/wiki/Foo_(bar)|w (en.wikipedia.org)>",
+		"**see [docs](https://a.example)**":            "*see <https://a.example|docs (a.example)>*",
+		"see [a](https://a.example), and [b](https://b.example/x_y_z).": "see <https://a.example|a (a.example)>, and <https://b.example/x_y_z|b (b.example)>.",
+		"[a [b] c](https://x.example)":                                  "<https://x.example|a [b] c (x.example)>",
+		"[**bold** `code` _it_](https://x.example)":                     "<https://x.example|bold code it (x.example)>",
+		"[a [b](https://y.example) c](https://x.example)":               "<https://x.example|a [b](https://y.example) c (x.example)>",
+		"[a & b](https://x.example/?a=1&b=2)":                           "<https://x.example/?a=1&amp;b=2|a &amp; b (x.example)>",
+		"[a](https://ok.example)<!channel>":                             "<https://ok.example|a (ok.example)>&lt;!channel&gt;",
 		"``a ` b``":                                                     "`a ˋ b`",
 		"`` ``` ``":                                                     "`ˋˋˋ`",
 		"`a<b>&c`":                                                      "`a&lt;b&gt;&amp;c`",
@@ -115,7 +115,7 @@ func TestMrkdwnInlineFormatting(t *testing.T) {
 		"x ``` y":                                                       "x ˋˋˋ y",
 		"x ````` y `` z ` w":                                            "x ˋˋˋˋˋ y `` z ` w",
 		"`a``b`":                                                        "`aˋˋb`",
-		"[x](http://a.example/p) [y](file:///etc/passwd) [z](https://b.example)": "<http://a.example/p|x> [y](file:///etc/passwd) <https://b.example|z>",
+		"[x](http://a.example/p) [y](file:///etc/passwd) [z](https://b.example)": "<http://a.example/p|x (a.example)> [y](file:///etc/passwd) <https://b.example|z (b.example)>",
 	} {
 		if got := FromMarkdown(in); got != want {
 			t.Errorf("%q\n got  %q\n want %q", in, got, want)
@@ -218,7 +218,7 @@ func TestMrkdwnMarksInsideASpanOfTheirKind(t *testing.T) {
 func TestMrkdwnLinkAddressLimits(t *testing.T) {
 	base := "https://a.example/"
 	ok := base + strings.Repeat("a", 2000-len(base))
-	if got := FromMarkdown("[x](" + ok + ")"); got != "<"+ok+"|x>" {
+	if got := FromMarkdown("[x](" + ok + ")"); got != "<"+ok+"|x (a.example)>" {
 		t.Errorf("an address of 2000 bytes: %.60q", got)
 	}
 	long := ok + "a"
@@ -226,19 +226,19 @@ func TestMrkdwnLinkAddressLimits(t *testing.T) {
 		t.Errorf("an address of 2001 bytes became a link: %.60q", got)
 	}
 	// Non-ASCII letters are fine in an address.
-	if got := FromMarkdown("[x](https://a.example/путь)"); got != "<https://a.example/путь|x>" {
+	if got := FromMarkdown("[x](https://a.example/путь)"); got != "<https://a.example/путь|x (a.example)>" {
 		t.Errorf("%q", got)
 	}
 }
 
 func TestMrkdwnLinkLabels(t *testing.T) {
 	for in, want := range map[string]string{
-		"[a|b](https://x.example)":                          "<https://x.example|a¦b>",
-		"[a > b](https://x.example)":                        "<https://x.example|a &gt; b>",
-		"[<!channel>](https://x.example)":                   "<https://x.example|&lt;!channel&gt;>",
-		"[<#C123|name>](https://x.example)":                 "<https://x.example|&lt;#C123¦name&gt;>",
-		"![<@U12345>](https://x.example)":                   "<https://x.example|&lt;@U12345&gt;>",
-		"[<https://evil.example|click>](https://x.example)": "<https://x.example|&lt;https://evil.example¦click&gt;>",
+		"[a|b](https://x.example)":                          "<https://x.example|a¦b (x.example)>",
+		"[a > b](https://x.example)":                        "<https://x.example|a &gt; b (x.example)>",
+		"[<!channel>](https://x.example)":                   "<https://x.example|&lt;!channel&gt; (x.example)>",
+		"[<#C123|name>](https://x.example)":                 "<https://x.example|&lt;#C123¦name&gt; (x.example)>",
+		"![<@U12345>](https://x.example)":                   "<https://x.example|&lt;@U12345&gt; (x.example)>",
+		"[<https://evil.example|click>](https://x.example)": "<https://x.example|&lt;https://evil.example¦click&gt; (x.example)>",
 	} {
 		if got := FromMarkdown(in); got != want {
 			t.Errorf("%q\n got  %q\n want %q", in, got, want)
@@ -280,7 +280,7 @@ func TestMrkdwnBlocks(t *testing.T) {
 		"## Title ##":                         "*Title*",
 		"### A **b** title ##":                "*A b title*",
 		"   # three spaces":                   "*three spaces*",
-		"# `code` and [l](https://a.example)": "*`code` and <https://a.example|l>*",
+		"# `code` and [l](https://a.example)": "*`code` and <https://a.example|l (a.example)>*",
 		"# ":                                  "",
 		"#":                                   "#",
 		"#tag":                                "#tag",
@@ -495,7 +495,7 @@ func TestMrkdwnRealisticAnswer(t *testing.T) {
 	if msg := mdCheck(in, got); msg != "" {
 		t.Fatalf("%s\n%s", msg, got)
 	}
-	for _, want := range []string{"*Итоги*", "*три*", "`StopFlush`", "> Важно: не трогать `kill-server`.", "```\ntmux -S \"$SOCK\" kill-server   # &lt;- только свой сокет\n```", "<https://example.com/readme|README>", "snake_case_name", "1. Агент", "Хук   │ ✅"} {
+	for _, want := range []string{"*Итоги*", "*три*", "`StopFlush`", "> Важно: не трогать `kill-server`.", "```\ntmux -S \"$SOCK\" kill-server   # &lt;- только свой сокет\n```", "<https://example.com/readme|README (example.com)>", "snake_case_name", "1. Агент", "Хук   │ ✅"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in\n%s", want, got)
 		}
@@ -581,264 +581,15 @@ func TestMrkdwnRandomTextHoldsTheRules(t *testing.T) {
 		if msg := mdCheck(in, out); msg != "" {
 			t.Fatalf("%q\n gave %q\n%s", in, out, msg)
 		}
-		// Split first and convert the pieces, as the sender does.
-		for _, p := range Split(in, 128) {
-			if msg := mdCheck(p, FromMarkdown(p)); msg != "" {
-				t.Fatalf("%q\n split from %q\n gave %q\n%s", p, in, FromMarkdown(p), msg)
+		// Cut the converted text, as the sender does, and check each piece as an output of its own. (A link that is longer than a
+		// piece has to be cut inside; the sender's pieces are 2900 bytes and a link is an address of 2000 bytes and a label.)
+		if longLink(out, 128) {
+			continue
+		}
+		for _, p := range SplitMrkdwn(out, 128) {
+			if msg := mdCheck(p, p); msg != "" {
+				t.Fatalf("%q\n cut from %q\n of %q\n%s", p, out, in, msg)
 			}
-		}
-	}
-}
-
-// mdEndsInBlock reads the lines of a piece of Markdown and says whether it ends inside a code block.
-func mdEndsInBlock(piece string) (open bool) {
-	mark := ""
-	for _, l := range strings.Split(piece, "\n") {
-		if !open {
-			if m := mdFence(l); m != "" && len(m) <= mdMaxFence { // Split follows no longer fence
-				open, mark = true, m
-			}
-		} else if mdClosesFence(l, mark) {
-			open = false
-		}
-	}
-	return open
-}
-
-func TestMrkdwnSplitKeepsEachPieceWhole(t *testing.T) {
-	var b strings.Builder
-	b.WriteString("intro line\n```go\n")
-	for i := 0; i < 400; i++ {
-		b.WriteString(fmt.Sprintf("fmt.Println(\"line %04d \", <x> & ", i))
-		b.WriteString(strings.Repeat("x", i%7))
-		b.WriteString(")\n")
-	}
-	b.WriteString("```\nthe end\n")
-	parts := Split(b.String(), 1000)
-	if len(parts) < 5 {
-		t.Fatalf("%d parts", len(parts))
-	}
-	for i, p := range parts {
-		if len(p) > 1000 {
-			t.Errorf("part %d is %d bytes", i, len(p))
-		}
-		if i < len(parts)-1 && mdEndsInBlock(p) {
-			t.Errorf("part %d ends inside a code block", i)
-		}
-		// The converted piece has its fences in pairs, whatever the piece looked like.
-		if out := FromMarkdown(p); mdCheck(p, out) != "" {
-			t.Errorf("part %d: %s\n%.200s", i, mdCheck(p, out), out)
-		}
-	}
-	if !strings.HasPrefix(parts[1], "```go\n") {
-		t.Errorf("the second part does not open the block again: %.30q", parts[1])
-	}
-	if !strings.HasPrefix(FromMarkdown(parts[1]), "```\nfmt.Println") {
-		t.Errorf("the second part converted: %.30q", FromMarkdown(parts[1]))
-	}
-	if !strings.Contains(parts[len(parts)-1], "the end") {
-		t.Error("the text after the block is lost")
-	}
-	// Every line of the block is in some piece once, in order.
-	var all strings.Builder
-	for _, p := range parts {
-		all.WriteString(p)
-		all.WriteByte('\n')
-	}
-	prev := -1
-	for i := 0; i < 400; i++ {
-		at := strings.Index(all.String(), fmt.Sprintf("line %04d ", i))
-		if at < 0 || at < prev || strings.Count(all.String(), fmt.Sprintf("line %04d ", i)) != 1 {
-			t.Fatalf("line %d is lost, doubled or out of order", i)
-		}
-		prev = at
-	}
-}
-
-func TestMrkdwnSplitShortTextIsOnePiece(t *testing.T) {
-	if got := Split("short", 100); len(got) != 1 || got[0] != "short" {
-		t.Errorf("%q", got)
-	}
-	exact := strings.Repeat("x", 100)
-	if got := Split(exact, 100); len(got) != 1 || got[0] != exact {
-		t.Errorf("a text of exactly max bytes: %q", got)
-	}
-	for _, in := range []string{"", "   \n ", "\n"} {
-		if got := Split(in, 100); len(got) != 0 {
-			t.Errorf("%q: white space alone is not a message, got %q", in, got)
-		}
-	}
-}
-
-func TestMrkdwnSplitNeverCutsACharacterAndLosesNothing(t *testing.T) {
-	long := strings.Repeat("слово ", 700) + "\n" + strings.Repeat("汉", 900) + "\n" + strings.Repeat("é", 1000)
-	for _, max := range []int{128, 200, 500, 1001} {
-		parts := Split(long, max)
-		var back strings.Builder
-		for _, p := range parts {
-			if len(p) > max {
-				t.Errorf("max %d: a part of %d bytes", max, len(p))
-			}
-			if !utf8.ValidString(p) {
-				t.Fatalf("max %d: a character was cut", max)
-			}
-			back.WriteString(p)
-		}
-		strip := strings.NewReplacer("\n", "", " ", "")
-		if strip.Replace(back.String()) != strip.Replace(long) {
-			t.Errorf("max %d: text was lost or changed by splitting", max)
-		}
-	}
-	// A line of one word longer than a piece is cut inside the word, and the pieces put together are the line.
-	line := strings.Repeat("x", 10000)
-	parts := Split(line, 2800)
-	if len(parts) != 4 || strings.Join(parts, "") != line {
-		t.Errorf("%d parts, %d bytes", len(parts), len(strings.Join(parts, "")))
-	}
-}
-
-// Prose is cut at line breaks, and a line that is too long at a space, so that words stay whole.
-func TestMrkdwnSplitCutsProseAtLinesAndSpaces(t *testing.T) {
-	var b strings.Builder
-	for i := 0; i < 100; i++ {
-		fmt.Fprintf(&b, "paragraph %03d of the answer, which has a few words in it\n\n", i)
-	}
-	parts := Split(b.String(), 500)
-	for i, p := range parts {
-		if len(p) > 500 {
-			t.Errorf("part %d is %d bytes", i, len(p))
-		}
-		if !strings.HasSuffix(strings.TrimRight(p, "\n"), "in it") {
-			t.Errorf("part %d is cut inside a paragraph: %q", i, p[max(0, len(p)-30):])
-		}
-	}
-	words := strings.TrimSpace(strings.Repeat("word ", 1000))
-	for i, p := range Split(words, 300) {
-		if i > 0 && !strings.HasPrefix(p, "word") {
-			t.Errorf("part %d starts inside a word: %.10q", i, p)
-		}
-		if t.Failed() {
-			break
-		}
-	}
-}
-
-// The text is not trusted: a long line after the fence, a long fence, a tiny max, none of it may make a piece longer than max,
-// leave a block open in a piece that is not the last, or stop the loop.
-func TestMrkdwnSplitHoldsWhatTheTextDoes(t *testing.T) {
-	body := strings.Repeat("line of code here\n", 300)
-	long := func(n int, s string) string { return strings.Repeat(s, n) }
-	inputs := map[string]string{
-		"plain block":               "```go\n" + body + "```\n",
-		"tilde block":               "~~~\n" + body + "~~~\n",
-		"long language":             "```" + long(2700, "x") + "\n" + body + "```\n",
-		"longer than a piece":       "```" + long(2900, "x") + "\n" + body + "```\n",
-		"just under a piece":        "```" + long(2790, "x") + "\n" + body + "```\n",
-		"long fence":                long(100, "`") + "\n" + body,
-		"very long fence":           long(3000, "`") + "\n" + body,
-		"fence then long line":      "```" + long(2000, "x") + "\n" + long(5000, "y") + "\n```\n",
-		"long line in a block":      "```\n" + long(10000, "y") + "\n```\n",
-		"long closing fence":        "```\nx\n" + long(5000, "`") + "\ny\n",
-		"fences in a row":           long(500, "```\n"),
-		"many languages":            long(300, "```go\nx\n```\n"),
-		"wide characters":           "```\n" + long(2000, "汉") + "\n" + long(2000, "汉汉\n") + "```\n",
-		"bad UTF-8":                 "```\n" + long(2000, "\xff\x80") + "\n```\n",
-		"block never closed":        "```\n" + body,
-		"quote of a block":          "> ```\n" + strings.Repeat("> code\n", 1000) + "> ```\n",
-		"mentions in a block":       "```\n" + long(500, "<!channel> <@U1>\n") + "```\n",
-		"blank lines":               long(5000, "\n"),
-		"wide text, no line breaks": long(3000, "汉字 "),
-	}
-	for name, in := range inputs {
-		for _, max := range []int{128, 129, 150, 300, 1000, 2800} {
-			var parts []string
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				parts = Split(in, max)
-			}()
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatalf("%s, max %d: Split does not stop", name, max)
-			}
-			for i, p := range parts {
-				if len(p) > max {
-					t.Errorf("%s, max %d: part %d is %d bytes", name, max, i, len(p))
-				}
-				if strings.TrimSpace(p) == "" {
-					t.Errorf("%s, max %d: part %d is empty", name, max, i)
-				}
-				if name != "bad UTF-8" && !utf8.ValidString(p) {
-					t.Errorf("%s, max %d: part %d has a cut character", name, max, i)
-				}
-				if i < len(parts)-1 && mdEndsInBlock(p) {
-					t.Errorf("%s, max %d: part %d ends inside a code block", name, max, i)
-				}
-				if out := FromMarkdown(p); mdCheck(p, out) != "" {
-					t.Errorf("%s, max %d: part %d: %s", name, max, i, mdCheck(p, out))
-				}
-			}
-		}
-		for _, max := range []int{0, 1, 2, 3, 4, 10, 63, 127} {
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				for _, p := range Split(in, max) {
-					if len(p) > max && utf8.RuneCountInString(p) > 1 && name != "bad UTF-8" {
-						t.Errorf("%s, max %d: a part of %d bytes", name, max, len(p))
-					}
-				}
-			}()
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatalf("%s, max %d: Split does not stop", name, max)
-			}
-		}
-	}
-}
-
-// Lines of text and of fences in any order: every line that is not a fence is in the pieces once and in order, and a piece
-// that is not the last does not end inside a block.
-func TestMrkdwnSplitRandomLines(t *testing.T) {
-	rng := rand.New(rand.NewSource(5))
-	for n := 0; n < 500; n++ {
-		var lines []string
-		for i, k := 0, 20+rng.Intn(200); i < k; i++ {
-			switch rng.Intn(8) {
-			case 0:
-				lines = append(lines, []string{"```", "```go", "~~~", "````", "  ```py"}[rng.Intn(5)])
-			case 1:
-				lines = append(lines, "")
-			default:
-				lines = append(lines, fmt.Sprintf("text %d %s", i, strings.Repeat("é", rng.Intn(30))))
-			}
-		}
-		in := strings.Join(lines, "\n")
-		max := 128 + rng.Intn(300)
-		parts := Split(in, max)
-		var got, want []string
-		for i, p := range parts {
-			if len(p) > max {
-				t.Fatalf("part %d is %d bytes, max %d", i, len(p), max)
-			}
-			if i < len(parts)-1 && mdEndsInBlock(p) {
-				t.Fatalf("part %d ends inside a code block, max %d\n%s", i, max, p)
-			}
-			for _, l := range strings.Split(p, "\n") {
-				if strings.HasPrefix(l, "text ") {
-					got = append(got, l)
-				}
-			}
-		}
-		for _, l := range lines {
-			if strings.HasPrefix(l, "text ") {
-				want = append(want, l)
-			}
-		}
-		if strings.Join(got, "\n") != strings.Join(want, "\n") {
-			t.Fatalf("lines lost or doubled, max %d\n%q", max, in)
 		}
 	}
 }
@@ -923,4 +674,14 @@ func TestMrkdwnSplitPlainRandom(t *testing.T) {
 			t.Fatalf("%q fits in %d but gave %q", in, max, parts)
 		}
 	}
+}
+
+// longLink says that the converted text has a link longer than max, which no cut can keep whole.
+func longLink(s string, max int) bool {
+	for _, m := range mdLinkRe.FindAllString(s, -1) {
+		if len(m) > max {
+			return true
+		}
+	}
+	return false
 }

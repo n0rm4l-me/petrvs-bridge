@@ -14,11 +14,12 @@ import (
 // maxText is the longest text of one part of a message, in bytes. A block of text holds 3000 characters; escaping can make a
 // text longer, so a part that does not fit after it is cut in two.
 const (
-	maxPartInput = 2800
-	maxBlockText = 3000
-	maxButtonRow = 5
-	maxRows      = 10
-	maxButtonLen = 75
+	maxPartInput  = 2800 // bytes of plain text in one message, before escaping
+	maxBlockText  = 3000 // characters that a block of text holds
+	maxPartMrkdwn = 2900 // bytes of converted text in one message
+	maxButtonRow  = 5
+	maxRows       = 10
+	maxButtonLen  = 75
 )
 
 // part is one message of Slack: the text as Slack should read it, and how to read it.
@@ -28,26 +29,21 @@ type part struct {
 	raw   string // the text before escaping, for a plain part (shown in a plain_text block)
 }
 
-// parts cuts a message into messages of Slack, each short enough for a block of text after conversion.
+// parts cuts a message into messages of Slack, each short enough for a block of text. Markdown is converted first and the result is
+// cut (SplitMrkdwn), so that a cut cannot change what any part of the text means; plain text is cut and then escaped, and a piece
+// that does not fit after escaping is cut in two (plain text has no state that a cut could change).
 func parts(m telegram.Message) []part {
 	var out []part
+	if m.Markdown {
+		for _, p := range SplitMrkdwn(FromMarkdown(m.Text), maxPartMrkdwn) {
+			out = append(out, part{text: p})
+		}
+		return out
+	}
 	var add func(src string, depth int)
 	add = func(src string, depth int) {
-		var pieces []string
-		if m.Markdown {
-			pieces = Split(src, maxPartInput)
-		} else {
-			pieces = SplitPlain(src, maxPartInput)
-		}
-		for _, p := range pieces {
-			var pt part
-			if m.Markdown {
-				pt = part{text: FromMarkdown(p)}
-			} else {
-				pt = part{text: Escape(p), plain: true, raw: p}
-			}
-			if len(pt.text) > maxBlockText && len(p) > 1 && depth < 6 {
-				// Escaping made it longer than a block holds: cut the source in two and convert each half.
+		for _, p := range SplitPlain(src, maxPartInput) {
+			if esc := Escape(p); len(esc) > maxBlockText && len(p) > 1 && depth < 6 {
 				half := len(p) / 2
 				for half > 0 && !utf8.RuneStart(p[half]) {
 					half--
@@ -57,12 +53,9 @@ func parts(m telegram.Message) []part {
 				}
 				add(p[:half], depth+1)
 				add(p[half:], depth+1)
-				continue
+			} else if strings.TrimSpace(p) != "" {
+				out = append(out, part{text: esc, plain: true, raw: p})
 			}
-			if strings.TrimSpace(pt.text) == "" {
-				continue
-			}
-			out = append(out, pt)
 		}
 	}
 	add(m.Text, 0)
@@ -75,7 +68,11 @@ func blocks(p part, rows [][]telegram.Button) string {
 	if p.plain {
 		typ, txt = "plain_text", p.raw
 	}
-	section := map[string]any{"type": "section", "text": map[string]any{"type": typ, "text": txt}}
+	text := map[string]any{"type": typ, "text": txt}
+	if !p.plain {
+		text["verbatim"] = true // Slack must not turn names and links in this text into mentions and links on its own
+	}
+	section := map[string]any{"type": "section", "text": text}
 	bl := []any{section}
 	for r, row := range rows {
 		if r >= maxRows {
@@ -144,7 +141,16 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, m telegram.Messa
 			reply
 			TS string `json:"ts"`
 		}
-		if err := c.callRetry(ctx, "chat.postMessage", c.cfg.BotToken, params, &out); err != nil {
+		err := c.callRetry(ctx, "chat.postMessage", c.cfg.BotToken, params, &out)
+		var ae *telegram.APIError
+		if err != nil && params.Get("blocks") != "" && errors.As(err, &ae) && ae.Code == 400 {
+			// Slack did not like the blocks (a label it refuses, say). The words are what matters: send them without the buttons,
+			// and say so, rather than lose the message for good.
+			params.Del("blocks")
+			params.Set("text", p.text+"\n(the buttons could not be shown)")
+			err = c.callRetry(ctx, "chat.postMessage", c.cfg.BotToken, params, &out)
+		}
+		if err != nil {
 			return ids, err
 		}
 		if id, ok := tsToID(out.TS); ok {

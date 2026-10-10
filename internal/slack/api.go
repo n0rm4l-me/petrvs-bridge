@@ -13,11 +13,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/n0rm4l-me/petrvs-bridge/internal/slack/slackid"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/telegram"
 )
 
 // DefaultAPIBase is where the Web API lives.
-const DefaultAPIBase = "https://slack.com/api"
+const DefaultAPIBase = slackid.DefaultAPIBase
 
 // The hub already speaks one vocabulary of errors (telegram.APIError, telegram.ErrRateLimited): a 400 means that this very request
 // is wrong and will be wrong again, so the agent drops the message; anything else may pass, so the agent sends it again. The
@@ -46,19 +47,30 @@ type reply struct {
 
 // statusOf says how the hub should treat an error code of Slack, in the codes of HTTP the hub understands.
 func statusOf(code string) int {
+	n, _ := statusKnown(code)
+	return n
+}
+
+// statusKnown is statusOf, and says whether the code is one that Slack documents or this client knows.
+func statusKnown(code string) (int, bool) {
 	switch code {
 	case "ratelimited", "rate_limited":
-		return 429
+		return 429, true
 	case "invalid_auth", "not_authed", "token_revoked", "token_expired", "account_inactive", "missing_scope", "no_permission",
 		"not_allowed_token_type", "access_denied", "channel_not_found", "not_in_channel", "is_archived", "user_not_found",
 		"user_disabled", "team_access_not_granted", "restricted_action", "action_prohibited", "external_channel_migrating",
-		"cannot_dm_bot", "ekm_access_denied", "org_login_required":
-		return 403
+		"cannot_dm_bot", "ekm_access_denied", "org_login_required", "accesslimited":
+		return 403, true
 	case "internal_error", "fatal_error", "service_unavailable", "request_timeout", "team_added_to_org":
-		return 503
+		return 503, true
+	case "msg_too_long", "invalid_blocks", "invalid_blocks_format", "invalid_arguments", "invalid_arg_name", "invalid_array_arg",
+		"invalid_charset", "invalid_form_data", "invalid_post_type", "missing_post_type", "no_text", "invalid_name", "message_not_found",
+		"thread_not_found", "file_not_found", "invalid_ts_latest", "invalid_ts_oldest", "too_many_attachments", "no_reaction",
+		"already_reacted", "too_many_reactions", "bad_timestamp", "cant_update_message", "edit_window_closed", "user_not_found_in_channel":
+		return 400, true
 	}
-	// msg_too_long, invalid_blocks, invalid_arguments, no_text, invalid_name, message_not_found, ... : this request is wrong.
-	return 400
+	// A code that is not known: this request is wrong, as far as Slack's own answer goes (see call for the rest).
+	return 400, false
 }
 
 // clean keeps the address, which can carry a one-time ticket, out of a transport error.
@@ -105,7 +117,13 @@ func (a *apiClient) call(ctx context.Context, method, token string, params url.V
 		if statusOf(r.Error) == 429 {
 			return telegram.ErrRateLimited{After: retryAfter(resp.Header)}
 		}
-		return &telegram.APIError{Method: method, Code: statusOf(r.Error), Desc: describe(r)}
+		code, known := statusKnown(r.Error)
+		if !known && resp.StatusCode >= 400 {
+			// Not Slack's own answer (a proxy, a gateway, an error page that happens to be JSON): the HTTP status says more than a
+			// code nobody knows, and a 400 here would make the hub drop the message for good.
+			code = resp.StatusCode
+		}
+		return &telegram.APIError{Method: method, Code: code, Desc: describe(r)}
 	}
 	if out != nil {
 		if err := json.Unmarshal(body, out); err != nil {
@@ -126,6 +144,9 @@ func describe(r reply) string {
 
 // safeWord keeps a code short and made of harmless characters, since it is copied into logs and into the chat.
 func safeWord(s string) string {
+	if l := strings.ToLower(s); strings.Contains(l, "xox") || strings.Contains(l, "xapp") {
+		return "redacted" // whatever it was, it looks like a token, and a code of Slack never does
+	}
 	if len(s) > 80 {
 		s = s[:80]
 	}

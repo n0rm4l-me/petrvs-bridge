@@ -1,6 +1,6 @@
 # Deploying the hub
 
-The hub is the only part that runs in the cloud. It needs outbound access to Telegram and to Pub/Sub and listens on nothing.
+The hub is the only part that runs in the cloud. It needs outbound access to its chat service (Telegram, or Slack) and to Pub/Sub and listens on nothing.
 The agent is not deployed like this: it runs next to the terminal it controls, as a plain binary (`make dist`), and only
 talks to Pub/Sub.
 
@@ -73,7 +73,7 @@ The agents' public bundles (`NAME.pub.json`) go into the chart's `agents.files`;
 With `hub.chat: slack` the hub reads two other tokens and the id of one Slack user, and needs no Telegram setting. The agents do not
 change. Make the app first: `hub slack-manifest` prints its manifest (the README, "Slack", has the steps).
 
-1. Put the **bot token** (`xoxb-...`) and the **app-level token** (`xapp-...`, right `connections:write`) into the secret store as two
+1. Make the app from the manifest (`hub slack-manifest`) and install it. Put the **bot token** (`xoxb-...`) and the **app-level token** (`xapp-...`, right `connections:write`) into the secret store as two
    entries, and give the chart their names (`secrets.slackBotToken.externalSecret.remoteKey`,
    `secrets.slackAppToken.externalSecret.remoteKey`); or make the two Secrets by hand, with the key `token` in each
    (`secrets.slackBotToken.secretName`, `secrets.slackAppToken.secretName`).
@@ -87,7 +87,13 @@ change. Make the app first: `hub slack-manifest` prints its manifest (the README
    minute stops being ready and says so in its log; it keeps trying with growing waits.
 
 Tokens are rotated by changing the entries of the store and restarting the hub (the Secrets are read at start). Reinstalling the app
-in Slack issues a new bot token and revokes the old one.
+in Slack issues a new bot token and revokes the old one; the app-level token is made again under *Basic Information*, *App-Level Tokens*.
+
+**One hub per app.** Slack hands each event to one of the connections that are open, so two hubs with the same tokens split the
+messages between them, silently (Telegram answers the second poller with a 409). The chart runs one replica for that reason.
+
+**The app is fixed when it is made.** Its slash commands do not follow the hub. After an upgrade that adds a command, or a new prefix,
+print the manifest again (`hub slack-manifest`) and update the app.
 
 ## 5. The chart
 
@@ -121,7 +127,7 @@ number is read by Helm as a float and would reach the hub as `1.23456789e+08`. E
 The hub logs JSON lines on standard output with the fields `severity` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) and `message`,
 which Cloud Logging reads on GKE, so a log-based alert on `severity>=ERROR` works. They never contain message text or tokens.
 
-When the hub is stopped (an upgrade, a drain) it makes one last Telegram call of at most 2 s to confirm the updates it has handled, so that its successor does not type them again; Kubernetes' default 30 s grace period is ample.
+When the hub is stopped (an upgrade, a drain) it makes one last call to the chat (Telegram) of at most 2 s to confirm the updates it has handled (Slack needs none: an event is acknowledged when it arrives), so that its successor does not type them again; Kubernetes' default 30 s grace period is ample.
 
 Only one replica may run. The chart fixes that, because two hubs would fight over one bot.
 
@@ -130,7 +136,7 @@ Only one replica may run. The chart fixes that, because two hubs would fight ove
 Telegram loop still turns: a failed poll, or a wait that Telegram asked for, counts as alive (a restart would not help), a loop that hangs does not.
 *Ready* adds that the last poll worked, the bus receiver runs and the hub is not stopping. Nothing routes to the pod, so a failed readiness shows in its
 status and holds a rollout back, nothing more. After SIGTERM the hub says at once that it is not ready, cancels its work and waits up to
-`PB_SHUTDOWN_TIMEOUT` (`hub.shutdownTimeout`, 20 s) for the handlers in flight, the bus receiver and the last confirmation to Telegram;
+`PB_SHUTDOWN_TIMEOUT` (`hub.shutdownTimeout`, 20 s) for the handlers in flight, the bus receiver and the last confirmation to the chat;
 `terminationGracePeriodSeconds` (40 s) is above that. The probes need an image that has the `probe` command (this one and later); set
 `health.enabled: false` for an older image.
 

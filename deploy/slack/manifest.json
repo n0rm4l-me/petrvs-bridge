@@ -36,7 +36,7 @@
       },
       {
         "command": "/pb-alarm",
-        "description": "Alarm status; /alarm on, /alarm off [code]",
+        "description": "Alarm status; /pb-alarm on, /pb-alarm off [code]",
         "should_escape": false
       },
       {
@@ -91,27 +91,27 @@
       },
       {
         "command": "/pb-key",
-        "description": "Press a key by number or name: /key 2, /key btab",
+        "description": "Press a key by number or name: /pb-key 2, /pb-key btab",
         "should_escape": false
       },
       {
         "command": "/pb-clear",
-        "description": "Type /clear into the session",
+        "description": "Clear the session: types Claude Code's own clear command",
         "should_escape": false
       },
       {
         "command": "/pb-compact",
-        "description": "Type /compact into the session",
+        "description": "Compact the session: types Claude Code's own compact command",
         "should_escape": false
       },
       {
         "command": "/pb-resume",
-        "description": "Type /resume into the session",
+        "description": "Resume an older session: types Claude Code's own resume command",
         "should_escape": false
       },
       {
         "command": "/pb-continue",
-        "description": "Start Claude Code again on the machine; /continue NAME for one agent",
+        "description": "Start Claude Code again on the machine; /pb-continue NAME for one agent",
         "should_escape": false
       }
     ]

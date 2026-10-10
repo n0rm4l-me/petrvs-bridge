@@ -6,14 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"regexp"
 	"time"
 
 	"github.com/coder/websocket"
 )
-
-// commandPrefixRe is what the prefix of the slash commands may be.
-var commandPrefixRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,9}$`)
 
 // errReconnect is Slack's request to open the connection again (it refreshes connections now and then).
 var errReconnect = errors.New("slack: asked to reconnect")
@@ -40,8 +36,8 @@ func (c *Client) session(ctx context.Context) error {
 	if err := c.callRetry(ctx, "apps.connections.open", c.cfg.AppToken, nil, &open); err != nil {
 		return err
 	}
-	u, ok := c.trusted(open.URL, "wss", "ws")
-	if !ok || (u.Scheme == "ws" && !c.loop) {
+	u, ok := c.trustedSocket(open.URL)
+	if !ok {
 		return errors.New("slack: apps.connections.open gave an address that is not a Slack socket")
 	}
 	dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -62,6 +58,11 @@ func (c *Client) session(ctx context.Context) error {
 	}
 	c.up()
 	c.connectedNow.Store(true)
+	c.everUp.Store(true)
+	select {
+	case c.hello <- struct{}{}:
+	default:
+	}
 	c.log.Info("connected to Slack (Socket Mode)")
 	// What the user wrote while there was no socket is read back before the socket is read, so that it comes in order and
 	// before anything newer.

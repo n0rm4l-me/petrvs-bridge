@@ -12,8 +12,9 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
+
+	"github.com/n0rm4l-me/petrvs-bridge/internal/slack/slackid"
 )
 
 // The hub tells chats and users apart by number. Slack's ids are strings, so the client keeps the one chat and the one user that
@@ -21,8 +22,8 @@ import (
 // that the hub's own check ("this chat and this user, or nobody") stays a second wall behind the client's.
 const (
 	// ChatID is the number of the allowed direct message, UserID the number of the allowed user.
-	ChatID int64 = 1
-	UserID int64 = 1
+	ChatID = slackid.ChatID
+	UserID = slackid.UserID
 )
 
 // otherID gives a stranger (a channel or a user that is not allowed) a number: at least 2, so it never equals ChatID or UserID.
@@ -67,31 +68,14 @@ func tsTime(ts string) time.Time {
 // What Slack's ids look like. The client checks every id it is given or hears, because they come from the network and from the
 // settings and are sent back in requests.
 var (
-	userIDRe    = regexp.MustCompile(`^[UW][A-Z0-9]{8,31}$`)
-	channelIDRe = regexp.MustCompile(`^D[A-Z0-9]{8,31}$`) // a direct message
-	teamIDRe    = regexp.MustCompile(`^[TE][A-Z0-9]{8,31}$`)
-	fileIDRe    = regexp.MustCompile(`^F[A-Z0-9]{8,31}$`)
+	teamIDRe     = regexp.MustCompile(`^[TE][A-Z0-9]{8,31}$`)
+	fileIDRe     = regexp.MustCompile(`^F[A-Z0-9]{8,31}$`)
+	anyChannelRe = regexp.MustCompile(`^[CDG][A-Z0-9]{8,31}$`)
+	triggerRe    = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 )
 
-// ValidUserID says that s can be the id of a Slack user (U... or W...).
-func ValidUserID(s string) bool { return userIDRe.MatchString(s) }
-
-// ValidChannelID says that s can be the id of a direct message (D...).
-func ValidChannelID(s string) bool { return channelIDRe.MatchString(s) }
-
-// ValidBotToken and ValidAppToken check only the shape: xoxb- for the bot, xapp- for the app-level token of Socket Mode. They
-// catch the tokens swapped or pasted from the wrong place before any request carries one.
-func ValidBotToken(s string) bool { return tokenShape(s, "xoxb-") }
-func ValidAppToken(s string) bool { return tokenShape(s, "xapp-") }
-
-func tokenShape(s, prefix string) bool {
-	if !strings.HasPrefix(s, prefix) || len(s) < len(prefix)+10 || len(s) > 400 {
-		return false
-	}
-	for _, r := range s {
-		if r <= ' ' || r >= 0x7f {
-			return false
-		}
-	}
-	return true
-}
+// The checks of ids and tokens are in slackid, which the settings use without the client.
+func ValidUserID(s string) bool    { return slackid.ValidUserID(s) }
+func ValidChannelID(s string) bool { return slackid.ValidChannelID(s) }
+func ValidBotToken(s string) bool  { return slackid.ValidBotToken(s) }
+func ValidAppToken(s string) bool  { return slackid.ValidAppToken(s) }

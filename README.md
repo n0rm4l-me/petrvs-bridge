@@ -255,12 +255,18 @@ refused by Slack's own client unless you choose *Send as message*.
 * The hub does not unfurl links.
 * Edited messages are ignored: a message is obeyed as it was first written.
 * Slack keeps no events for a socket that is closed, and it closes and opens one every few hours. Whenever the hub opens the socket
-  again it reads back what you wrote since the last message it heard of, in order, so a blip loses nothing. A hub that is started
-  anew does not know that message and reads nothing back: what you wrote while it was down (a rollout takes about half a minute) is
+  again it reads back what you wrote in the direct message since the last message it heard of, in order (a reply inside a thread is
+  not in the history of the channel, so a reply written in a thread while the socket was closed is lost unless it was also sent to the
+  channel). A hub that is started anew does not know that message and reads nothing back: what you wrote while it was down (a rollout takes about half a minute) is
   lost, where Telegram keeps it for a day. Replaying old messages after a restart would be worse, since a command could run twice.
   Likewise an event is acknowledged to Slack when it arrives; if the hub stops between that and its work, you send the message again.
-* A link written as `[https://good.example](https://evil.example)` is shown by its real address, since Slack would show only the
-  label.
+* A link written as `[docs](https://example.com)` is shown as `docs (example.com)`: unless the label already names the host, the host
+  is added after it, since Slack would show only the label and a label can say one place while the address goes to another.
+* In a thread, a plain reply to a message of an agent goes to that agent, as a swipe-reply does in Telegram. A slash command carries no
+  thread and goes to the active agent (choose it with `/pb-agent`); to send a command to one agent, write it as a plain message,
+  `@name /enter`, which Slack leaves alone because it does not start with a slash, and the hub reads as in Telegram.
+* The app's slash commands are fixed when the app is made. After a hub upgrade that adds commands, or a changed prefix, print the
+  manifest again (`bin/hub slack-manifest`) and update the app (*App Manifest* in the app's settings).
 
 ## Alarm mode
 
@@ -302,9 +308,9 @@ unknown flag prints them too, and exits with 2).
 | `SLACK_APP_TOKEN` | none | required for Slack (or the next) | The app-level token of Socket Mode (`xapp-...`, with `connections:write`) |
 | `PB_SLACK_APP_TOKEN_FILE` | none | | File holding it (mode 0600). Used if the variable above is unset |
 | `PB_SLACK_USER_ID` | `-slack-user` | required for Slack | The only Slack user that is obeyed, like `U0123ABCD` |
-| `PB_SLACK_CHANNEL_ID` | `-slack-channel` | unset | The direct message of that user with the app, like `D0123ABCD`. Unset, the hub asks Slack for it, which needs the `im:write` right |
+| `PB_SLACK_CHANNEL_ID` | `-slack-channel` | unset | The direct message of that user with the app, like `D0123ABCD`. The hub always asks Slack for that direct message (the `im:write` right) and refuses to start if this setting names another; it is a check, and lets the hub run unchecked, with a warning, if the app lacks the right |
 | `PB_SLACK_COMMAND_PREFIX` | `-slack-command-prefix` | `pb-` | Put before the names of the app's slash commands: `/pb-status` reaches the hub as `/status`. It must be the prefix of the manifest |
-| `PB_SLACK_API_BASE` | `-slack-api` | `https://slack.com/api` | The Web API address; plain http is accepted only for localhost (a test double) |
+| `PB_SLACK_API_BASE` | `-slack-api` | `https://slack.com/api` | The Web API address. Only https on `slack.com` is accepted (the tokens are sent there), or plain http on localhost for a test double |
 | `PB_PROJECT` | `-project` | required unless the emulator is used; then `emulator` | Pub/Sub project id (`GOOGLE_CLOUD_PROJECT` is also read). With `PUBSUB_EMULATOR_HOST` set and no project, hub and agent both use `emulator`; set the same one on both if you set one |
 | `PB_PREFIX` | `-prefix` | `pb` | Prefix of topic and subscription names |
 | `PB_CREATE_RESOURCES` | `-create-resources` | `false` | Create topics and subscriptions. For development and the emulator only; create them with infrastructure code in production |

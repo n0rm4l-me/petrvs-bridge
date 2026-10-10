@@ -46,12 +46,12 @@
    "properties": {
     "userId": {
      "type": "string",
-     "pattern": "^([UW][A-Z0-9]{2,31})?$",
+     "pattern": "^([UW][A-Z0-9]{8,31})?$",
      "description": "The only Slack user that is obeyed, like U0123ABCD, as a quoted string. Required for Slack."
     },
     "channelId": {
      "type": "string",
-     "pattern": "^(D[A-Z0-9]{2,31})?$",
+     "pattern": "^(D[A-Z0-9]{8,31})?$",
      "description": "The direct message of that user with the app, like D0123ABCD. Empty: the hub asks Slack (needs the im:write right)."
     },
     "commandPrefix": {
@@ -61,7 +61,7 @@
     },
     "apiBase": {
      "type": "string",
-     "pattern": "^(https://[^ ]+|http://(localhost|127\\.0\\.0\\.1)[^ ]*)?$",
+     "pattern": "^(https://([a-z0-9-]+\\.)*slack\\.com(:443)?(/[^ ]*)?|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?(/[^ ]*)?)?$",
      "description": "The Web API address; empty keeps Slack's."
     }
    }

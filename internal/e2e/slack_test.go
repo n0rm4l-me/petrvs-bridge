@@ -37,7 +37,7 @@ func slackRig(t *testing.T, o testrig.Options) (*testrig.Rig, *slacktest.Server,
 	}
 	prev := o.Hub
 	o.Hub = func(c *hubsvc.Config) {
-		c.Telegram, c.ChatID, c.UserID, c.HelpNote = sl, slack.ChatID, slack.UserID, slack.HelpNote("pb-")
+		c.Telegram, c.ChatID, c.UserID, c.HelpNote, c.ChatName = sl, slack.ChatID, slack.UserID, slack.HelpNote("pb-"), "Slack"
 		c.FailedReaction = "👎"
 		c.PollTimeout = 100 * time.Millisecond
 		if prev != nil {
@@ -197,5 +197,18 @@ func TestAFileFromSlackBecomesAFileInTheInbox(t *testing.T) {
 	kind, path, caption, got := downSaved(t, r, a, 1)
 	if kind != "file" || caption != "see this" || string(got) != string(data) || !strings.Contains(path, "inbox-laptop") {
 		t.Fatalf("%s %s %q (%d bytes)", kind, path, caption, len(got))
+	}
+}
+
+func TestACommandToOneAgentIsAPlainMessageInSlack(t *testing.T) {
+	r, srv, _ := slackRig(t, testrig.Options{Agents: []string{"laptop", "nas"}})
+	r.StartAll()
+	r.WaitConnected("laptop")
+	r.WaitConnected("nas")
+	// "@nas /enter" does not start with a slash, so Slack leaves it alone and the hub reads it as it does in Telegram
+	srv.Say(slacktest.Msg{Text: "@nas /enter"})
+	r.Eventually("Enter on nas", func() bool { return len(r.Agents["nas"].Exec.Keys()) == 1 })
+	if len(r.Agents["laptop"].Exec.Keys()) != 0 || len(r.Agents["laptop"].Exec.Texts()) != 0 {
+		t.Fatal("the key went to the wrong agent")
 	}
 }

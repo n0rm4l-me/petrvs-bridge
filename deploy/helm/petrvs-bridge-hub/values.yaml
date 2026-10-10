@@ -38,7 +38,7 @@ slack:
   userId: ""            # required for Slack: the only user that is obeyed, like U0123ABCD (a quoted string)
   channelId: ""         # the direct message of that user with the app, like D0123ABCD; empty: the hub asks Slack, which needs the im:write right
   commandPrefix: pb-    # put before the slash commands of the app (/pb-status reaches the hub as /status); it must match the manifest
-  apiBase: ""           # the Web API address; empty keeps Slack's (a test double sets it)
+  apiBase: ""           # the Web API address; empty keeps Slack's. Only https on slack.com, or http on localhost for a test double
 
 # Where the hub keeps its lockdown (/lockdown): a file of a few bytes. On an emptyDir (the default) it survives a restarted
 # container but not a new pod, and the new hub then starts unlocked without saying so. With persistence it is kept on a
@@ -93,7 +93,7 @@ serviceAccount:
   annotations: {}       # on GKE with Workload Identity: iam.gke.io/gcp-service-account: HUB_SA@PROJECT.iam.gserviceaccount.com
 
 # The kubelet gives the pod this long, after SIGTERM, before it kills it. The hub says at once that it is not ready, cancels its work and
-# waits for the handlers in flight, the bus receiver and the last confirmation to Telegram (hub.shutdownTimeout, and 2 s for that
+# waits for the handlers in flight, the bus receiver and the last confirmation to the chat (hub.shutdownTimeout, and 2 s for that
 # confirmation); the rest is room.
 terminationGracePeriodSeconds: 40
 
@@ -106,7 +106,7 @@ terminationGracePeriodSeconds: 40
 health:
   enabled: true
   dir: /health
-  startup: {periodSeconds: 5, failureThreshold: 24}      # up to two minutes to the first beat (it uses the live check: an outage of Telegram or the bus at start must not make the kubelet restart the hub)
+  startup: {periodSeconds: 5, failureThreshold: 24}      # up to two minutes to the first beat (it uses the live check: an outage of the chat or the bus at start must not make the kubelet restart the hub)
   liveness: {periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 3}
   readiness: {periodSeconds: 10, timeoutSeconds: 5, failureThreshold: 2}
 
@@ -123,14 +123,14 @@ networkPolicy:
   enabled: true
   # Outbound HTTPS and DNS to any address by default. false: HTTPS not to the private, link-local and shared ranges (10/8,
   # 172.16/12, 192.168/16, 169.254/16, 100.64/10) and DNS only to kube-dns and the node's DNS cache (169.254.20.10), so the pod
-  # can reach Telegram and Google but nothing inside the cluster or the VPC. Keep true if Google APIs are reached through a
+  # can reach Telegram (or Slack) and Google but nothing inside the cluster or the VPC. Keep true if Google APIs are reached through a
   # private endpoint (Private Service Connect), or if the cluster's DNS is not kube-dns.
   allowPrivateRanges: true
   # true: the chart also makes the policies of the whole namespace, `default-deny` (nothing in or out for any pod that no other policy opens) and
   # `allow-dns` (DNS for every pod, to kube-dns and the node's DNS cache), so that a pod of no release, such as a debugging pod, can talk to nothing.
   # Their names are fixed: turn it on in one release per namespace.
   namespaceDefaultDeny: false
-  # Only outbound traffic is needed (Telegram and Google APIs, DNS); nothing listens. Further egress rules go here.
+  # Only outbound traffic is needed (Telegram or Slack, and Google APIs, DNS); nothing listens. Further egress rules go here.
   extraEgress: []
   # GKE Workload Identity reaches Google through a metadata server on the node. With a network policy that server has to
   # be allowed explicitly: 169.254.169.252:988 (and 169.254.169.254:80 on Dataplane V2). Turn this off elsewhere.

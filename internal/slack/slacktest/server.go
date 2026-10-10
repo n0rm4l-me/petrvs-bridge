@@ -74,12 +74,15 @@ type Server struct {
 	// UploadURL and SocketURL, if set, are given out instead of the fake's own addresses (to check that the client refuses
 	// an address that is not Slack's).
 	UploadURL, SocketURL string
+	// DisconnectOnHello makes the fake ask for a new connection at once, after every hello (a Slack that keeps asking).
+	DisconnectOnHello bool
 }
 
 type failure struct {
 	code   string // ok:false with this error
 	status int    // an HTTP status instead
 	retry  string // Retry-After
+	body   string // with status: this body instead of none
 }
 
 type ack struct {
@@ -92,7 +95,7 @@ func New(t *testing.T) *Server {
 	t.Helper()
 	s := &Server{t: t, reactions: map[string][]string{}, uploads: map[string]*Upload{}, pending: map[string]*Upload{},
 		files: map[string][]byte{}, fileMeta: map[string]map[string]any{}, calls: map[string]int{}, fails: map[string][]failure{},
-		baseSec: time.Now().Unix() - 100, connected: make(chan struct{}, 8)}
+		baseSec: time.Now().Unix() - 1, connected: make(chan struct{}, 8)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/", s.api)
 	mux.HandleFunc("/socket", s.socket)
@@ -146,6 +149,13 @@ func (s *Server) StatusNext(method string, status int) {
 	s.mu.Unlock()
 }
 
+// AnswerNext makes the next call of the method answer with the HTTP status and the body (a proxy, a gateway: not Slack's own answer).
+func (s *Server) AnswerNext(method string, status int, body string) {
+	s.mu.Lock()
+	s.fails[method] = append(s.fails[method], failure{status: status, body: body})
+	s.mu.Unlock()
+}
+
 // Calls says how many times a method was called.
 func (s *Server) Calls(method string) int {
 	s.mu.Lock()
@@ -191,7 +201,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			if f.retry != "" {
 				w.Header().Set("Retry-After", f.retry)
 			}
+			if f.body != "" {
+				w.Header().Set("Content-Type", "application/json")
+			}
 			w.WriteHeader(f.status)
+			io.WriteString(w, f.body)
 			return
 		}
 		writeJSON(w, map[string]any{"ok": false, "error": f.code})
@@ -265,16 +279,25 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		defer s.mu.Unlock()
 		var out []map[string]any
 		if oldest := form.Get("oldest"); oldest != "" {
-			// what the user wrote after `oldest`, the newest first
+			// what the user wrote after `oldest`, the newest first, a page at a time
 			for i := len(s.history) - 1; i >= 0; i-- {
 				if h := s.history[i]; fmt.Sprint(h["ts"]) > oldest {
 					out = append(out, h)
 				}
 			}
+			start, _ := strconv.Atoi(form.Get("cursor"))
+			if start > len(out) {
+				start = len(out)
+			}
+			out = out[start:]
+			resp := map[string]any{"ok": true}
 			if n, _ := strconv.Atoi(form.Get("limit")); n > 0 && len(out) > n {
 				out = out[:n]
+				resp["has_more"] = true
+				resp["response_metadata"] = map[string]any{"next_cursor": strconv.Itoa(start + n)}
 			}
-			writeJSON(w, map[string]any{"ok": true, "messages": out})
+			resp["messages"] = out
+			writeJSON(w, resp)
 			return
 		}
 		for _, p := range s.posted {
@@ -526,6 +549,11 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 	select {
 	case s.connected <- struct{}{}:
 	default:
+	}
+	if s.DisconnectOnHello {
+		conn.Write(ctx, websocket.MessageText, []byte(`{"type":"disconnect","reason":"too_many_websockets"}`))
+		conn.Close(websocket.StatusNormalClosure, "")
+		return
 	}
 	for {
 		_, data, err := conn.Read(ctx)
