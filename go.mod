@@ -4,6 +4,7 @@ go 1.26.6
 
 require (
 	cloud.google.com/go/pubsub/v2 v2.7.0
+	github.com/coder/websocket v1.8.15
 	golang.org/x/sys v0.47.0
 	google.golang.org/api v0.287.1
 	google.golang.org/grpc v1.83.2
