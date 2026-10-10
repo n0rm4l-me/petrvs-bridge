@@ -14,7 +14,7 @@
 | Takes over the chat account | can issue commands the hub relays; cannot disarm an alarm protected by a one-time code, cannot unlock a locked agent |
 | Reads the logs | no message text, no token; errors are stripped of URLs that contain the token |
 | Writes to the app in Slack from another account, channel or workspace | counted and ignored: the Slack client passes on only the one user, in the direct message with the app, in the workspace of the bot; the hub then checks the same again |
-| Puts a mention or a link in text that the agent shows (`<!channel>`, `<@U123>`, `<https://evil|x>`) | cannot ping anyone or make a link: every `&`, `<` and `>` is escaped, and a link is made only from a Markdown link to http, https or mailto that passed a check |
+| Puts a mention or a link in text that the agent shows (`<!channel>`, `<@U123>`, `<https://evil|x>`) | cannot ping anyone or make a link: every `&`, `<` and `>` is escaped, and a link is made only from a Markdown link to http, https or mailto that passed a check; its label is plain text and the address follows it as written (`label (https://...)`), so a label cannot name another place than the link goes to; text that reads backwards (direction overrides) is cleaned |
 
 ## What is not protected
 

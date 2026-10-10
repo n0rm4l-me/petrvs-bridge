@@ -207,9 +207,17 @@ func FuzzConvertAndSplit(f *testing.F) {
 		if max < 32 || max > 4000 {
 			max = 32 + (max%4000+4000)%3968
 		}
+		in = mdStripBidi(in) // as the sender does
 		out := FromMarkdown(in)
 		if msg := mdCheck(in, out); msg != "" {
 			t.Fatalf("%q\n gave %q\n%s", in, out, msg)
+		}
+		// A link is always written as its label and, after it, its address in brackets: the address that is shown is the one that
+		// was written. (Every <...> that is not a quote mark is an address that passed mdURL, so it is the same check as mdCheck's.)
+		for _, l := range mdLinkRe.FindAllString(out, -1) {
+			if strings.Contains(l, "|") {
+				t.Fatalf("a link with a label of its own: %q in %q", l, out)
+			}
 		}
 		if longLink(out, max) {
 			return
@@ -251,6 +259,50 @@ func TestPartsOfAnyMessageFitABlockAndAreSafe(t *testing.T) {
 					}
 				} else if Escape(p.raw) != p.text || !p.plain {
 					t.Fatalf("a plain part is not the escaped text: %q %q", p.raw, p.text)
+				}
+			}
+		}
+	}
+}
+
+// A code block inside a quote has "> " in front of its fence and of every line; a cut in it closes and opens it with the same mark.
+func TestSplitMrkdwnFollowsACodeBlockInsideAQuote(t *testing.T) {
+	conv := FromMarkdown("> ```\n> line 1\n> line 2 *x* :tada: http://evil.example\n> ```\n\nafter")
+	const code = "line 1line 2 *x* :tada: http://evil.example"
+	for max := 32; max < 70; max += 3 {
+		pieces := SplitMrkdwn(conv, max)
+		var inside []string
+		for i, p := range pieces {
+			if msg := mdCheck(p, p); msg != "" {
+				t.Fatalf("max %d piece %d: %s\n%q\nof %q", max, i, msg, p, conv)
+			}
+			in := false
+			for _, l := range strings.Split(p, "\n") {
+				switch {
+				case l == "> ```":
+					in = !in
+				case in:
+					if !strings.HasPrefix(l, "> ") {
+						t.Fatalf("max %d piece %d: a line of a quoted block lost its quote mark: %q", max, i, l)
+					}
+					inside = append(inside, strings.TrimPrefix(l, "> "))
+				case strings.Contains(l, "evil.example") || strings.Contains(l, "*x*"):
+					t.Fatalf("max %d piece %d: text of the block is outside it: %q", max, i, l)
+				}
+			}
+		}
+		if got := strings.Join(inside, ""); got != code {
+			t.Fatalf("max %d: the code changed:\n got  %q\n want %q\n%q", max, got, code, pieces)
+		}
+	}
+}
+
+func TestSplitMrkdwnDoesNotMakeAPieceOfOnlyFencesAndQuoteMarks(t *testing.T) {
+	for _, s := range []string{"```\n```\n> ", "> ```\n> ```\n>", "```\n```"} {
+		if got := SplitMrkdwn(s+"\n"+strings.Repeat("x", 100), 40); len(got) > 0 {
+			for _, p := range got {
+				if strings.TrimSpace(strings.NewReplacer("```", "", ">", "").Replace(p)) == "" {
+					t.Errorf("an empty piece %q from %q", p, s)
 				}
 			}
 		}

@@ -834,12 +834,14 @@ func (c *mdConv) link(s string, code []int32, i int, f mdFlags) (out string, nex
 	if text == dest {
 		return "<" + url + ">", next, true
 	}
-	label := strings.TrimSpace(c.inline(text, mdFlags{plain: true, depth: f.depth}))
+	label := strings.TrimSpace(mdStripBidi(c.inline(text, mdFlags{plain: true, depth: f.depth})))
 	if label == "" {
 		return "", 0, false
 	}
-	label = mdShowHost(label, dest)
-	return "<" + url + "|" + strings.ReplaceAll(label, "|", "¦") + ">", next, true
+	// Slack shows only the label of <address|label>, so a label can say one place while the address goes to another, and no test of
+	// the label keeps up with the ways of hiding that. So the label is never the text of the link: it is written as plain text, and the
+	// address follows it as a link of its own, which Slack shows as the address it is: label (https://example.com).
+	return label + " (<" + url + ">)", next, true
 }
 
 // mdDest reads the (address) or (address "title") that follows the text of a link at s[p], and returns the address and the
@@ -931,6 +933,19 @@ func mdURL(u string) (string, bool) {
 	for _, r := range u {
 		if r == '<' || r == '>' || r == '|' || r == '`' || r == utf8.RuneError || unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return "", false
+		}
+	}
+	if scheme != "mailto:" {
+		// The host of an address must be ASCII (an internationalised name is written in punycode): a host made of look-alike letters
+		// reads as another one, and the address is what the user is shown and clicks on.
+		authority := u[len(scheme):]
+		if k := strings.IndexAny(authority, "/?#"); k >= 0 {
+			authority = authority[:k]
+		}
+		for i := 0; i < len(authority); i++ {
+			if authority[i] >= 0x80 {
+				return "", false
+			}
 		}
 	}
 	return strings.ReplaceAll(scheme+u[len(scheme):], "&", "&amp;"), true

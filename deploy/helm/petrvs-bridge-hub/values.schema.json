@@ -61,7 +61,7 @@
     },
     "apiBase": {
      "type": "string",
-     "pattern": "^(https://([a-z0-9-]+\\.)*slack\\.com(:443)?(/[^ ]*)?|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?(/[^ ]*)?)?$",
+     "pattern": "^(https://([a-z0-9-]+\\.)*slack\\.com(:443)?(/[^ ?#]*)?|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?(/[^ ?#]*)?)?$",
      "description": "The Web API address; empty keeps Slack's."
     }
    }

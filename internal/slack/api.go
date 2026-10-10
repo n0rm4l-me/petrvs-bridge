@@ -54,7 +54,7 @@ func statusOf(code string) int {
 // statusKnown is statusOf, and says whether the code is one that Slack documents or this client knows.
 func statusKnown(code string) (int, bool) {
 	switch code {
-	case "ratelimited", "rate_limited":
+	case "ratelimited", "rate_limited", "message_limit_exceeded":
 		return 429, true
 	case "invalid_auth", "not_authed", "token_revoked", "token_expired", "account_inactive", "missing_scope", "no_permission",
 		"not_allowed_token_type", "access_denied", "channel_not_found", "not_in_channel", "is_archived", "user_not_found",

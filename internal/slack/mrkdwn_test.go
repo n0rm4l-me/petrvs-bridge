@@ -92,20 +92,20 @@ func TestMrkdwnInlineFormatting(t *testing.T) {
 		"~~**both**~~":                                 "~*both*~",
 		"a < b && c > d":                               "a &lt; b &amp;&amp; c &gt; d",
 		"escaped \\*stars\\* and \\<":                  "escaped *stars* and &lt;",
-		"[the docs](https://example.com/a?b=1&c=2)":    "<https://example.com/a?b=1&amp;c=2|the docs (example.com)>",
-		"![pic](https://example.com/p.png)":            "<https://example.com/p.png|pic (example.com)>",
+		"[the docs](https://example.com/a?b=1&c=2)":    "the docs (<https://example.com/a?b=1&amp;c=2>)",
+		"![pic](https://example.com/p.png)":            "pic (<https://example.com/p.png>)",
 		"[https://a.example](https://a.example)":       "<https://a.example>",
 		"[HTTPS://A.example/X](HTTPS://A.example/X)":   "<https://A.example/X>",
-		"mail [me](mailto:me@x.example)":               "mail <mailto:me@x.example|me>",
-		"[x](https://a.example/p \"a title\")":         "<https://a.example/p|x (a.example)>",
-		"[w](https://en.wikipedia.org/wiki/Foo_(bar))": "<https://en.wikipedia.org/wiki/Foo_(bar)|w (en.wikipedia.org)>",
-		"**see [docs](https://a.example)**":            "*see <https://a.example|docs (a.example)>*",
-		"see [a](https://a.example), and [b](https://b.example/x_y_z).": "see <https://a.example|a (a.example)>, and <https://b.example/x_y_z|b (b.example)>.",
-		"[a [b] c](https://x.example)":                                  "<https://x.example|a [b] c (x.example)>",
-		"[**bold** `code` _it_](https://x.example)":                     "<https://x.example|bold code it (x.example)>",
-		"[a [b](https://y.example) c](https://x.example)":               "<https://x.example|a [b](https://y.example) c (x.example)>",
-		"[a & b](https://x.example/?a=1&b=2)":                           "<https://x.example/?a=1&amp;b=2|a &amp; b (x.example)>",
-		"[a](https://ok.example)<!channel>":                             "<https://ok.example|a (ok.example)>&lt;!channel&gt;",
+		"mail [me](mailto:me@x.example)":               "mail me (<mailto:me@x.example>)",
+		"[x](https://a.example/p \"a title\")":         "x (<https://a.example/p>)",
+		"[w](https://en.wikipedia.org/wiki/Foo_(bar))": "w (<https://en.wikipedia.org/wiki/Foo_(bar)>)",
+		"**see [docs](https://a.example)**":            "*see docs (<https://a.example>)*",
+		"see [a](https://a.example), and [b](https://b.example/x_y_z).": "see a (<https://a.example>), and b (<https://b.example/x_y_z>).",
+		"[a [b] c](https://x.example)":                                  "a [b] c (<https://x.example>)",
+		"[**bold** `code` _it_](https://x.example)":                     "bold code it (<https://x.example>)",
+		"[a [b](https://y.example) c](https://x.example)":               "a [b](https://y.example) c (<https://x.example>)",
+		"[a & b](https://x.example/?a=1&b=2)":                           "a &amp; b (<https://x.example/?a=1&amp;b=2>)",
+		"[a](https://ok.example)<!channel>":                             "a (<https://ok.example>)&lt;!channel&gt;",
 		"``a ` b``":                                                     "`a ˋ b`",
 		"`` ``` ``":                                                     "`ˋˋˋ`",
 		"`a<b>&c`":                                                      "`a&lt;b&gt;&amp;c`",
@@ -115,7 +115,7 @@ func TestMrkdwnInlineFormatting(t *testing.T) {
 		"x ``` y":                                                       "x ˋˋˋ y",
 		"x ````` y `` z ` w":                                            "x ˋˋˋˋˋ y `` z ` w",
 		"`a``b`":                                                        "`aˋˋb`",
-		"[x](http://a.example/p) [y](file:///etc/passwd) [z](https://b.example)": "<http://a.example/p|x (a.example)> [y](file:///etc/passwd) <https://b.example|z (b.example)>",
+		"[x](http://a.example/p) [y](file:///etc/passwd) [z](https://b.example)": "x (<http://a.example/p>) [y](file:///etc/passwd) z (<https://b.example>)",
 	} {
 		if got := FromMarkdown(in); got != want {
 			t.Errorf("%q\n got  %q\n want %q", in, got, want)
@@ -218,7 +218,7 @@ func TestMrkdwnMarksInsideASpanOfTheirKind(t *testing.T) {
 func TestMrkdwnLinkAddressLimits(t *testing.T) {
 	base := "https://a.example/"
 	ok := base + strings.Repeat("a", 2000-len(base))
-	if got := FromMarkdown("[x](" + ok + ")"); got != "<"+ok+"|x (a.example)>" {
+	if got := FromMarkdown("[x](" + ok + ")"); got != "x (<"+ok+">)" {
 		t.Errorf("an address of 2000 bytes: %.60q", got)
 	}
 	long := ok + "a"
@@ -226,19 +226,19 @@ func TestMrkdwnLinkAddressLimits(t *testing.T) {
 		t.Errorf("an address of 2001 bytes became a link: %.60q", got)
 	}
 	// Non-ASCII letters are fine in an address.
-	if got := FromMarkdown("[x](https://a.example/путь)"); got != "<https://a.example/путь|x (a.example)>" {
+	if got := FromMarkdown("[x](https://a.example/путь)"); got != "x (<https://a.example/путь>)" {
 		t.Errorf("%q", got)
 	}
 }
 
 func TestMrkdwnLinkLabels(t *testing.T) {
 	for in, want := range map[string]string{
-		"[a|b](https://x.example)":                          "<https://x.example|a¦b (x.example)>",
-		"[a > b](https://x.example)":                        "<https://x.example|a &gt; b (x.example)>",
-		"[<!channel>](https://x.example)":                   "<https://x.example|&lt;!channel&gt; (x.example)>",
-		"[<#C123|name>](https://x.example)":                 "<https://x.example|&lt;#C123¦name&gt; (x.example)>",
-		"![<@U12345>](https://x.example)":                   "<https://x.example|&lt;@U12345&gt; (x.example)>",
-		"[<https://evil.example|click>](https://x.example)": "<https://x.example|&lt;https://evil.example¦click&gt; (x.example)>",
+		"[a|b](https://x.example)":                          "a|b (<https://x.example>)",
+		"[a > b](https://x.example)":                        "a &gt; b (<https://x.example>)",
+		"[<!channel>](https://x.example)":                   "&lt;!channel&gt; (<https://x.example>)",
+		"[<#C123|name>](https://x.example)":                 "&lt;#C123|name&gt; (<https://x.example>)",
+		"![<@U12345>](https://x.example)":                   "&lt;@U12345&gt; (<https://x.example>)",
+		"[<https://evil.example|click>](https://x.example)": "&lt;https://evil.example|click&gt; (<https://x.example>)",
 	} {
 		if got := FromMarkdown(in); got != want {
 			t.Errorf("%q\n got  %q\n want %q", in, got, want)
@@ -280,7 +280,7 @@ func TestMrkdwnBlocks(t *testing.T) {
 		"## Title ##":                         "*Title*",
 		"### A **b** title ##":                "*A b title*",
 		"   # three spaces":                   "*three spaces*",
-		"# `code` and [l](https://a.example)": "*`code` and <https://a.example|l (a.example)>*",
+		"# `code` and [l](https://a.example)": "*`code` and l (<https://a.example>)*",
 		"# ":                                  "",
 		"#":                                   "#",
 		"#tag":                                "#tag",
@@ -421,8 +421,6 @@ func TestMrkdwnInjectionsAreInert(t *testing.T) {
 			switch {
 			case ctx.piped && strings.HasPrefix(ctx.name, "table"):
 				want = Escape(strings.SplitN(inj, "|", 2)[0])
-			case ctx.piped:
-				want = strings.ReplaceAll(want, "|", "¦")
 			}
 			if ctx.name != "label and address" && !strings.Contains(out, want) {
 				t.Errorf("%s, %q: the text is not there\n in  %q\n out %q", ctx.name, inj, in, out)
@@ -495,7 +493,7 @@ func TestMrkdwnRealisticAnswer(t *testing.T) {
 	if msg := mdCheck(in, got); msg != "" {
 		t.Fatalf("%s\n%s", msg, got)
 	}
-	for _, want := range []string{"*Итоги*", "*три*", "`StopFlush`", "> Важно: не трогать `kill-server`.", "```\ntmux -S \"$SOCK\" kill-server   # &lt;- только свой сокет\n```", "<https://example.com/readme|README (example.com)>", "snake_case_name", "1. Агент", "Хук   │ ✅"} {
+	for _, want := range []string{"*Итоги*", "*три*", "`StopFlush`", "> Важно: не трогать `kill-server`.", "```\ntmux -S \"$SOCK\" kill-server   # &lt;- только свой сокет\n```", "README (<https://example.com/readme>)", "snake_case_name", "1. Агент", "Хук   │ ✅"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in\n%s", want, got)
 		}
@@ -679,9 +677,69 @@ func TestMrkdwnSplitPlainRandom(t *testing.T) {
 // longLink says that the converted text has a link longer than max, which no cut can keep whole.
 func longLink(s string, max int) bool {
 	for _, m := range mdLinkRe.FindAllString(s, -1) {
-		if len(m) > max {
+		if len(m)+2 > max { // the bracket after it, and the line break
 			return true
 		}
 	}
 	return false
+}
+
+// A look-alike host is not made a link: the user would be shown a name that reads as another one.
+func TestMrkdwnAHostThatIsNotASCIIIsNotALink(t *testing.T) {
+	for _, in := range []string{"[apple](https://аpple.com/)", "[x](http://exаmple.com)", "[x](https://例え.jp/path)", "[x](https://a.example@аpple.com/)"} {
+		if got := FromMarkdown(in); strings.Contains(got, "(<") || strings.Contains(got, "<http") {
+			t.Errorf("%q gave %q", in, got)
+		}
+	}
+	// an internationalised name written in punycode, and non-ASCII letters after the host, are fine
+	if got := FromMarkdown("[x](https://xn--pple-43d.com/путь)"); got != "x (<https://xn--pple-43d.com/путь>)" {
+		t.Errorf("%q", got)
+	}
+}
+
+// The spoofs of the second review: whatever the label says, the address that follows it is the one that was written.
+func TestMrkdwnTheAddressIsShownWhateverTheLabelSays(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"[support@paypal.com](mailto:attacker@evil.example)", "support@paypal.com (<mailto:attacker@evil.example>)"},
+		{"[paypal.com/evil.example](https://evil.example)", "paypal.com/evil.example (<https://evil.example>)"},
+		{"[https://paypal.com/login/evil.example](https://evil.example)", "https://paypal.com/login/evil.example (<https://evil.example>)"},
+		{"[paypal.com](https:///evil.example/)", "paypal.com (<https:///evil.example/>)"},
+		{"[good.com](https://evil.example\\@good.com)", "good.com (<https://evil.example\\@good.com>)"},
+		{"[`slack.com`](https://evil.example)", "slack.com (<https://evil.example>)"},
+		{"[**slack.com**](https://evil.example)", "slack.com (<https://evil.example>)"},
+		{"[paypal.com\u202e](https://moc.lapyap.xyz)", "paypal.com (<https://moc.lapyap.xyz>)"},
+	} {
+		if got := FromMarkdown(c.in); got != c.want {
+			t.Errorf("%q\n  -> %q\n want %q", c.in, got, c.want)
+		}
+	}
+	long := "[" + strings.Repeat("paypal.com sign in ", 200) + "](https://evil.example/login)"
+	got := FromMarkdown(long)
+	if !strings.HasSuffix(got, " (<https://evil.example/login>)") {
+		t.Errorf("a long label pushed the address out of sight: %.60q ... %.60q", got, got[len(got)-60:])
+	}
+	// and the pieces of a long label cut it at spaces, never the address
+	for _, p := range SplitMrkdwn(got, 400) {
+		if strings.Count(p, "<") != strings.Count(p, ">") {
+			t.Errorf("a piece cuts the address: %q", p)
+		}
+	}
+}
+
+func TestMrkdwnDirectionControlsAreRemovedFromTheText(t *testing.T) {
+	in := "safe\u202etxt.exe \u2066x\u2069 \u200fy\u200e \u061cz [a\u202e](https://e.example)"
+	for _, p := range parts(telegramMessage(in, true)) {
+		if strings.ContainsAny(p.text, "‪‫‬‭‮⁦⁧⁨⁩‎‏؜") {
+			t.Errorf("a direction control got through: %q", p.text)
+		}
+	}
+	for _, p := range parts(telegramMessage(in, false)) {
+		if strings.ContainsAny(p.text, "‪‫‬‭‮⁦⁧⁨⁩‎‏؜") {
+			t.Errorf("a direction control got through: %q", p.text)
+		}
+	}
+	// the joiners of emoji sequences stay
+	if got := mdStripBidi("👨‍👩‍👧"); got != "👨‍👩‍👧" {
+		t.Errorf("%q", got)
+	}
 }

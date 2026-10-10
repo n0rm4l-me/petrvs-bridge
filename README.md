@@ -260,8 +260,10 @@ refused by Slack's own client unless you choose *Send as message*.
   channel). A hub that is started anew does not know that message and reads nothing back: what you wrote while it was down (a rollout takes about half a minute) is
   lost, where Telegram keeps it for a day. Replaying old messages after a restart would be worse, since a command could run twice.
   Likewise an event is acknowledged to Slack when it arrives; if the hub stops between that and its work, you send the message again.
-* A link written as `[docs](https://example.com)` is shown as `docs (example.com)`: unless the label already names the host, the host
-  is added after it, since Slack would show only the label and a label can say one place while the address goes to another.
+* A link written as `[docs](https://example.com)` is shown as `docs (https://example.com)`: the label is plain text and the address is the
+  link. Slack shows only the label of its own `<address|label>` links, so a label could say one place while the address goes to
+  another; the address is therefore always shown as written. A link to a host that is not ASCII (a look-alike of a known name) is not made a link.
+* Characters that change the direction of the text (the right-to-left override and the like) are removed from what the agent says.
 * In a thread, a plain reply to a message of an agent goes to that agent, as a swipe-reply does in Telegram. A slash command carries no
   thread and goes to the active agent (choose it with `/pb-agent`); to send a command to one agent, write it as a plain message,
   `@name /enter`, which Slack leaves alone because it does not start with a slash, and the hub reads as in Telegram.
@@ -308,7 +310,7 @@ unknown flag prints them too, and exits with 2).
 | `SLACK_APP_TOKEN` | none | required for Slack (or the next) | The app-level token of Socket Mode (`xapp-...`, with `connections:write`) |
 | `PB_SLACK_APP_TOKEN_FILE` | none | | File holding it (mode 0600). Used if the variable above is unset |
 | `PB_SLACK_USER_ID` | `-slack-user` | required for Slack | The only Slack user that is obeyed, like `U0123ABCD` |
-| `PB_SLACK_CHANNEL_ID` | `-slack-channel` | unset | The direct message of that user with the app, like `D0123ABCD`. The hub always asks Slack for that direct message (the `im:write` right) and refuses to start if this setting names another; it is a check, and lets the hub run unchecked, with a warning, if the app lacks the right |
+| `PB_SLACK_CHANNEL_ID` | `-slack-channel` | unset | The direct message of that user with the app, like `D0123ABCD`. The hub always asks Slack for that direct message (the `im:write` right, which the manifest has) and does not start, with the reason in its log, if this setting names another or the right is missing |
 | `PB_SLACK_COMMAND_PREFIX` | `-slack-command-prefix` | `pb-` | Put before the names of the app's slash commands: `/pb-status` reaches the hub as `/status`. It must be the prefix of the manifest |
 | `PB_SLACK_API_BASE` | `-slack-api` | `https://slack.com/api` | The Web API address. Only https on `slack.com` is accepted (the tokens are sent there), or plain http on localhost for a test double |
 | `PB_PROJECT` | `-project` | required unless the emulator is used; then `emulator` | Pub/Sub project id (`GOOGLE_CLOUD_PROJECT` is also read). With `PUBSUB_EMULATOR_HOST` set and no project, hub and agent both use `emulator`; set the same one on both if you set one |

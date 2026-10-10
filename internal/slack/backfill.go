@@ -66,10 +66,12 @@ func (c *Client) backfill(parent context.Context) {
 			params.Set("cursor", cursor)
 		}
 		if err := c.callRetry(ctx, "conversations.history", c.cfg.BotToken, params, &h); err != nil {
+			// All or nothing: the newest of the messages without the older ones they follow would run without their context, and
+			// nobody would know. Nothing is handled, so none of them gets the mark of the machine and the user sends them again.
 			if parent.Err() == nil {
-				c.log.Warn("could not read back what was written while the socket was closed", "err", err)
+				c.log.Error("could not read back what was written while the socket was closed; none of it is handled, send it again", "err", err)
 			}
-			break
+			return
 		}
 		all = append(all, h.Messages...)
 		cursor, more = h.Meta.Next, h.HasMore
@@ -79,7 +81,8 @@ func (c *Client) backfill(parent context.Context) {
 		}
 	}
 	if more {
-		c.log.Warn("more was written while the socket was closed than could be read back; the oldest of it was not", "read", len(all))
+		c.log.Error("more was written while the socket was closed than could be read back; none of it is handled, send it again", "read", len(all))
+		return
 	}
 	for i := len(all) - 1; i >= 0; i-- {
 		m := all[i]

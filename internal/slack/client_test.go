@@ -167,22 +167,6 @@ func TestAChannelThatIsNotTheUsersDirectMessageIsNeverWrittenTo(t *testing.T) {
 	}
 }
 
-func TestWithoutTheRightToOpenAChatTheConfiguredChannelIsUsedAndTheLogSaysSo(t *testing.T) {
-	srv := slacktest.New(t)
-	srv.FailNext("conversations.open", "missing_scope")
-	buf := &syncBuf{}
-	c, _ := New(Config{BotToken: slacktest.BotToken, AppToken: slacktest.AppToken, UserID: slacktest.UserID, APIBase: srv.APIURL(), ChannelID: slacktest.Channel,
-		Log: slog.New(slog.NewJSONHandler(buf, nil)), ReconnectMin: 10 * time.Millisecond, ReconnectMax: 20 * time.Millisecond})
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); c.Run(ctx) }()
-	t.Cleanup(func() { cancel(); <-done })
-	srv.WaitConnected(t, 5*time.Second)
-	if c.DMChannel() != slacktest.Channel || !strings.Contains(buf.String(), "no im:write right") {
-		t.Fatalf("%q\n%s", c.DMChannel(), buf.String())
-	}
-}
-
 func TestBadSettingsAreRefusedBeforeAnyRequest(t *testing.T) {
 	good := Config{BotToken: slacktest.BotToken, AppToken: slacktest.AppToken, UserID: slacktest.UserID}
 	for name, mut := range map[string]func(*Config){
@@ -490,7 +474,7 @@ func TestMarkdownIsShownAsSlackFormatting(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := r.srv.Posted()[0].Text
-	for _, want := range []string{"*bold*", "`code`", "<https://example.com|a link (example.com)>"} {
+	for _, want := range []string{"*bold*", "`code`", "a link (<https://example.com>)"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("%q does not hold %q", got, want)
 		}
@@ -1050,7 +1034,7 @@ func TestAGapLongerThanAPageIsReadBackInPagesAndInOrder(t *testing.T) {
 	r.quiet(200 * time.Millisecond)
 }
 
-func TestAGapLongerThanAllThePagesIsSaidInTheLog(t *testing.T) {
+func TestAGapLongerThanAllThePagesIsNotHalfHandled(t *testing.T) {
 	old := backfillPage
 	backfillPage = 1
 	t.Cleanup(func() { backfillPage = old })
@@ -1062,8 +1046,26 @@ func TestAGapLongerThanAllThePagesIsSaidInTheLog(t *testing.T) {
 		r.srv.SayMissed(slacktest.Msg{Text: "missed " + itoaN(i)})
 	}
 	r.srv.WaitConnected(t, 5*time.Second)
-	r.updates(backfillPages, 5*time.Second)
-	r.eventually("the warning", func() bool { return strings.Contains(r.log.String(), "than could be read back") })
+	r.eventually("the message in the log", func() bool { return strings.Contains(r.log.String(), "none of it is handled") })
+	// the newest messages are not run without the older ones they follow: nothing is
+	r.quiet(300 * time.Millisecond)
+}
+
+func TestAHistoryThatFailsInTheMiddleHandlesNothingOfIt(t *testing.T) {
+	old := backfillPage
+	backfillPage = 2
+	t.Cleanup(func() { backfillPage = old })
+	r := newRig(t, nil)
+	r.srv.Say(slacktest.Msg{Text: "before"})
+	r.next()
+	r.srv.DropSocket()
+	for i := 0; i < 5; i++ {
+		r.srv.SayMissed(slacktest.Msg{Text: "missed " + itoaN(i)})
+	}
+	r.srv.FailNext("conversations.history", "internal_error") // the first page works only if this is consumed second
+	r.srv.WaitConnected(t, 5*time.Second)
+	r.eventually("the message in the log", func() bool { return strings.Contains(r.log.String(), "none of it is handled") })
+	r.quiet(300 * time.Millisecond)
 }
 
 // ---- regression cases ----
@@ -1297,5 +1299,16 @@ func TestAnErrorCodeThatLooksLikeATokenIsNotCopiedIntoErrorsOrLogs(t *testing.T)
 	}
 	if got := safeWord("XAPP-1-secret"); got != "redacted" {
 		t.Fatalf("%q", got)
+	}
+}
+
+func TestAThrottleOnMessagesIsARateLimitAndNotARefusalForGood(t *testing.T) {
+	r := newRig(t, func(c *Config) { c.MaxRetryWait = 100 * time.Millisecond })
+	r.srv.FailNext("chat.postMessage", "message_limit_exceeded")
+	_, err := r.c.SendMessage(context.Background(), ChatID, telegram.Message{Text: "x"})
+	var rl telegram.ErrRateLimited
+	var ae *telegram.APIError
+	if !errors.As(err, &rl) || errors.As(err, &ae) {
+		t.Fatalf("%v", err)
 	}
 }

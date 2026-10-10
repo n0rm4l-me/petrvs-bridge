@@ -34,6 +34,7 @@ type part struct {
 // that does not fit after escaping is cut in two (plain text has no state that a cut could change).
 func parts(m telegram.Message) []part {
 	var out []part
+	m.Text = mdStripBidi(m.Text)
 	if m.Markdown {
 		for _, p := range SplitMrkdwn(FromMarkdown(m.Text), maxPartMrkdwn) {
 			out = append(out, part{text: p})

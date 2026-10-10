@@ -298,9 +298,7 @@ func (c *Client) start(ctx context.Context) error {
 		} `json:"channel"`
 	}
 	err := c.callRetry(ctx, "conversations.open", c.cfg.BotToken, url.Values{"users": {c.cfg.UserID}}, &open)
-	var ae *telegram.APIError
-	switch {
-	case err == nil:
+	if err == nil {
 		if !ValidChannelID(open.Channel.ID) {
 			return errors.New("slack: conversations.open did not name a direct message")
 		}
@@ -310,13 +308,6 @@ func (c *Client) start(ctx context.Context) error {
 		}
 		c.mu.Lock()
 		c.channel = open.Channel.ID
-		c.mu.Unlock()
-		return nil
-	case c.cfg.ChannelID != "" && errors.As(err, &ae) && strings.Contains(ae.Desc, "missing_scope"):
-		// An app without the im:write right cannot be asked; the configured channel is used, unchecked.
-		c.log.Warn("the app has no im:write right, so the configured channel cannot be checked against the user")
-		c.mu.Lock()
-		c.channel = c.cfg.ChannelID
 		c.mu.Unlock()
 		return nil
 	}

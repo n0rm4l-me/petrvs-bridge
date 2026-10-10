@@ -10,8 +10,8 @@ import (
 // The text is cut AFTER it was converted, never before: cutting Markdown and converting the pieces would let the cut decide what
 // the pieces mean (a code block cut in two is Markdown in its second half, and a link or a mark the author put inside it
 // comes alive). Converted text is flat and has no such state: a code block is a line of three backticks up to the next such line
-// (the converter never writes three backticks anywhere else), and every other construct, a span, a link, a quote mark, lives in
-// one line. So a piece ends at a line break; a line that is longer than a piece is cut at a space, never inside a link or an
+// (the converter never writes three backticks anywhere else; inside a quote the fence has the quote mark in front, "> ```"), and
+// every other construct, a span, a link, a quote mark, lives in one line. So a piece ends at a line break; a line that is longer than a piece is cut at a space, never inside a link or an
 // entity if that can be helped, and never inside a character; and where a cut falls inside a code block the piece is closed with
 // a fence line and the next one opened with one. A piece that has nothing in it but white space and fences is not sent.
 func SplitMrkdwn(s string, max int) []string {
@@ -24,21 +24,22 @@ func SplitMrkdwn(s string, max int) []string {
 	if len(s) <= max {
 		return []string{s}
 	}
-	const fence = "```"
 	var (
 		parts  []string
 		cur    []string
-		size   int  // the bytes of cur, a line break counted after each line
-		real   int  // the lines in cur that are not the fence that reopens a block
-		inCode bool // we are inside a code block, as the text stands at the line being read
+		size   int    // the bytes of cur, a line break counted after each line
+		real   int    // the lines in cur that are not the fence that reopens a block
+		inCode bool   // we are inside a code block, as the text stands at the line being read
+		fence  string // the fence line of the block we are in, "```" or, in a quote, "> ```"
 	)
+	blank := func(text string) bool { return strings.TrimSpace(mdFences.Replace(text)) == "" }
 	flush := func() {
 		if real > 0 {
 			text := strings.Join(cur, "\n")
 			if inCode {
 				text += "\n" + fence
 			}
-			if strings.TrimSpace(strings.ReplaceAll(text, fence, "")) != "" {
+			if !blank(text) {
 				parts = append(parts, text)
 			}
 		}
@@ -74,6 +75,11 @@ func SplitMrkdwn(s string, max int) []string {
 				continue
 			}
 			cut := mdCutLine(l, n, inCode)
+			quoted := strings.HasPrefix(l, "> ")
+			if quoted && cut < 4 && len(l) > 4 {
+				_, w := utf8.DecodeRuneInString(l[2:])
+				cut = 2 + w // the head must hold more than the quote mark, or the cutting would never get anywhere
+			}
 			cur = append(cur, l[:cut])
 			real++
 			size += cut + 1
@@ -82,6 +88,9 @@ func SplitMrkdwn(s string, max int) []string {
 			if l == "" {
 				break
 			}
+			if quoted {
+				l = "> " + l // the rest of a quoted line is quoted too
+			}
 		}
 		if l == "" && size == 0 {
 			continue
@@ -89,17 +98,24 @@ func SplitMrkdwn(s string, max int) []string {
 		cur = append(cur, l)
 		size += len(l) + 1
 		real++
-		if l == fence {
-			inCode = !inCode
+		if l == "```" || l == "> ```" {
+			if inCode {
+				inCode, fence = false, ""
+			} else {
+				inCode, fence = true, l
+			}
 		}
 	}
 	if real > 0 {
-		if text := strings.Join(cur, "\n"); strings.TrimSpace(strings.ReplaceAll(text, fence, "")) != "" {
+		if text := strings.Join(cur, "\n"); !blank(text) {
 			parts = append(parts, text)
 		}
 	}
 	return parts
 }
+
+// mdFences takes out what makes a piece look like something when it is nothing: fences and quote marks.
+var mdFences = strings.NewReplacer("```", "", ">", "")
 
 // mdCutLine finds where to cut the line l so that the head is at most n bytes: not inside a character, not inside an entity
 // (&amp;), outside code not inside an <address|label> and at a space in the second half of the head when there is one.
