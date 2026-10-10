@@ -13,6 +13,8 @@
 | Steals only a signing key | can forge a signed ack but cannot derive the session key without the static DH key |
 | Takes over the chat account | can issue commands the hub relays; cannot disarm an alarm protected by a one-time code, cannot unlock a locked agent |
 | Reads the logs | no message text, no token; errors are stripped of URLs that contain the token |
+| Writes to the app in Slack from another account, channel or workspace | counted and ignored: the Slack client passes on only the one user, in the direct message with the app, in the workspace of the bot; the hub then checks the same again |
+| Puts a mention or a link in text that the agent shows (`<!channel>`, `<@U123>`, `<https://evil|x>`) | cannot ping anyone or make a link: every `&`, `<` and `>` is escaped, and a link is made only from a Markdown link to http, https or mailto that passed a check |
 
 ## What is not protected
 
@@ -22,6 +24,16 @@
   hidden before it is sent, but that is best effort (a notice says "(some values are hidden)" when it did so). A dialog
   over 1800 characters loses its middle, is marked "[N characters left out]" and gets only an Esc button and the advice to
   read it on the laptop or with `/screen`: what cannot be read must not be approved from the phone.
+* **Slack, if it is the chat.** The same limit as for any chat: Slack and the hub see the plain text, and the owners of the Slack
+  workspace can see what the app's direct message holds (retention, export and e-discovery of the workspace apply). The app has
+  the least rights the client uses (`hub slack-manifest` lists them) and reads no channel. Two tokens are secrets: the **bot token**
+  posts as the app and reads its direct messages; the **app-level token** opens Socket Mode connections, and an event goes to one
+  of the connections that are open, so someone who holds it can receive some of the user's messages and acknowledge them, and the
+  hub never sees them. Keep both in the secret store, rotate them by reinstalling the app, and look at the app's connections
+  (api.slack.com/apps) if messages go missing. An event is acknowledged to Slack when it arrives, so a hub that stops
+  right then loses it; the user sends it again. After a gap in the socket the client reads the history of the direct message back
+  from the last message it heard of, through the same checks, and a restarted hub reads nothing back on purpose (a command must
+  not run twice).
 * **A compromised agent machine** can do what the agent can.
 * **Another process of the same user on the agent machine.** It can read the agent's identity, change the lock file, type
   into the tmux session itself and read the spool. Files are mode 0600 and the state directory 0700, which keeps other

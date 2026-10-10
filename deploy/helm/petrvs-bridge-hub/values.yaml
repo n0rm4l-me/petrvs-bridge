@@ -14,9 +14,11 @@ pubsub:
   prefix: pb            # the resources are called PREFIX-to-hub, PREFIX-hub, PREFIX-to-agent-NAME, PREFIX-agent-NAME
 
 hub:
+  chat: telegram        # telegram or slack: which chat the hub talks to (the settings of the other one are not used)
+  # --- Telegram (hub.chat: telegram) ---
   # Both ids must be QUOTED strings, for example "123456789", or "-1001234567890" for a group: a bare number in a values
   # file becomes a float and would be rendered as 1.23456789e+08 (values.schema.json refuses it). With --set use --set-string.
-  chatId: ""            # required: the only chat that is obeyed
+  chatId: ""            # required for Telegram: the only chat that is obeyed
   userId: ""            # the only user that is obeyed; empty means the chat id
   shutdownTimeout: "20s" # PB_SHUTDOWN_TIMEOUT: how long the hub waits, once told to stop, for the work in flight; keep terminationGracePeriodSeconds above it
   defaultAgent: ""      # the agent that gets plain text until you choose one; empty: the hub asks first when it has several
@@ -30,6 +32,14 @@ hub:
   maxReplyBytes: ""
   extraEnv: []          # more environment variables, in the Kubernetes {name, value} form
 
+# --- Slack (hub.chat: slack) --- the app is made from the manifest that `hub slack-manifest` prints (docs/DEPLOY.md). The hub opens
+# Socket Mode, a WebSocket that goes outward, so it still listens on nothing. It obeys one user, in the direct message with the app.
+slack:
+  userId: ""            # required for Slack: the only user that is obeyed, like U0123ABCD (a quoted string)
+  channelId: ""         # the direct message of that user with the app, like D0123ABCD; empty: the hub asks Slack, which needs the im:write right
+  commandPrefix: pb-    # put before the slash commands of the app (/pb-status reaches the hub as /status); it must match the manifest
+  apiBase: ""           # the Web API address; empty keeps Slack's (a test double sets it)
+
 # Where the hub keeps its lockdown (/lockdown): a file of a few bytes. On an emptyDir (the default) it survives a restarted
 # container but not a new pod, and the new hub then starts unlocked without saying so. With persistence it is kept on a
 # PersistentVolumeClaim (ReadWriteOnce; the Recreate strategy makes sure two pods never hold it at once).
@@ -40,11 +50,21 @@ state:
     storageClassName: ""  # empty: the cluster's default class
 
 secrets:
-  botToken:
+  botToken:                                   # Telegram: the bot token
     secretName: petrvs-bridge-bot            # a Secret with the bot token under the key below
     key: token
     externalSecret:
       remoteKey: ""     # set: an ExternalSecret (below) makes that Secret from this entry of the secret store, so nobody creates it by hand
+  slackBotToken:                              # Slack: the bot token (xoxb-...)
+    secretName: petrvs-bridge-slack-bot
+    key: token
+    externalSecret:
+      remoteKey: ""
+  slackAppToken:                              # Slack: the app-level token of Socket Mode (xapp-..., with connections:write)
+    secretName: petrvs-bridge-slack-app
+    key: token
+    externalSecret:
+      remoteKey: ""
   identity:
     secretName: petrvs-bridge-hub-identity   # a Secret that holds the hub's private identity file
     fileName: hub.identity.json
@@ -79,9 +99,9 @@ terminationGracePeriodSeconds: 40
 
 # The hub listens on nothing, so its probes are commands, not requests: `/hub probe live` and `/hub probe ready` read two files that the
 # hub touches every 5 s in a small in-memory volume (PB_HEALTH_DIR). Needs an image that has the `probe` command.
-#   live:  the Telegram loop still turns (a failed poll or a wait that Telegram asked for counts; a loop that hangs does not): the kubelet
+#   live:  the chat loop (Telegram's poll, or the wait for Slack's events) still turns (a failed poll or a wait that Telegram asked for counts; a loop that hangs does not): the kubelet
 #          restarts the container if it fails.
-#   ready: besides, the last poll worked, the bus receiver runs and the hub is not stopping. Nothing routes to the pod, so a failure only
+#   ready: besides, the last poll worked (with Slack: the socket is up), the bus receiver runs and the hub is not stopping. Nothing routes to the pod, so a failure only
 #          shows in the status of the pod, and a rollout waits for it.
 health:
   enabled: true

@@ -1,6 +1,6 @@
 apiVersion: v2
 name: petrvs-bridge-hub
-description: The hub of the bridge between a chat (Telegram) and terminal assistants, over Pub/Sub with end-to-end encryption
+description: The hub of the bridge between a chat (Telegram or Slack) and terminal assistants, over Pub/Sub with end-to-end encryption
 type: application
-version: 0.3.0
+version: 0.4.0
 appVersion: "0.1.0"

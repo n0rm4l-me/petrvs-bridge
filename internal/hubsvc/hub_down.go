@@ -283,14 +283,14 @@ func (h *Hub) transferFile(parent context.Context, fetcher telegram.FileFetcher,
 		h.failFile(parent, agent, "The hub was stopped while it fetched your file, so it was not sent. Send it again.")
 		return
 	case errors.Is(err, telegram.ErrFileTooLarge):
-		h.failFile(parent, agent, "The file is too large to fetch (this hub takes up to "+megabytes(limit)+", and Telegram lets a bot download at most 20 MB). Not sent.")
+		h.failFile(parent, agent, "The file is too large to fetch (this hub takes up to "+megabytes(limit)+h.fetchLimitNote()+"). Not sent.")
 		return
 	case err != nil:
 		var rl telegram.ErrRateLimited
 		if errors.As(err, &rl) {
-			h.failFile(parent, agent, "Telegram asks to slow down, so the file could not be fetched. Try again in a moment.")
+			h.failFile(parent, agent, h.cfg.ChatName+" asks to slow down, so the file could not be fetched. Try again in a moment.")
 		} else {
-			h.failFile(parent, agent, "Could not fetch the file from Telegram. Send it again.")
+			h.failFile(parent, agent, "Could not fetch the file from "+h.cfg.ChatName+". Send it again.")
 		}
 		h.log.Warn("could not fetch a file from the chat", "agent", agent, "err", err)
 		return

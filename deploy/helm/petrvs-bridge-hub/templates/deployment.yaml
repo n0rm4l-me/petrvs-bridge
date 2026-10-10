@@ -1,5 +1,14 @@
 {{- $project := required "pubsub.project is required" .Values.pubsub.project -}}
-{{- $chat := required "hub.chatId is required" .Values.hub.chatId -}}
+{{- $kind := .Values.hub.chat | default "telegram" -}}
+{{- if not (has $kind (list "telegram" "slack")) -}}
+{{- fail "hub.chat must be telegram or slack" -}}
+{{- end -}}
+{{- $chat := "" -}}
+{{- if eq $kind "telegram" -}}
+{{- $chat = required "hub.chatId is required for Telegram" .Values.hub.chatId -}}
+{{- else -}}
+{{- $_ := required "slack.userId is required for Slack" .Values.slack.userId -}}
+{{- end -}}
 {{- if and (not .Values.agents.existingConfigMap) (not .Values.agents.files) -}}
 {{- fail "agents.files or agents.existingConfigMap is required: the hub accepts only agents whose public bundle it has" -}}
 {{- end -}}
@@ -58,9 +67,21 @@ spec:
             - {name: PB_PREFIX, value: {{ .Values.pubsub.prefix | quote }}}
             - {name: PB_IDENTITY, value: {{ printf "/keys/%s" .Values.secrets.identity.fileName | quote }}}
             - {name: PB_AGENTS_DIR, value: /agents}
+            - {name: PB_CHAT, value: {{ $kind | quote }}}
+            {{- if eq $kind "telegram" }}
             - {name: PB_CHAT_ID, value: {{ include "hub.id" (list "hub.chatId" $chat) }}}
             {{- with .Values.hub.userId }}
             - {name: PB_USER_ID, value: {{ include "hub.id" (list "hub.userId" .) }}}
+            {{- end }}
+            {{- else }}
+            - {name: PB_SLACK_USER_ID, value: {{ .Values.slack.userId | quote }}}
+            - {name: PB_SLACK_COMMAND_PREFIX, value: {{ .Values.slack.commandPrefix | quote }}}
+            {{- with .Values.slack.channelId }}
+            - {name: PB_SLACK_CHANNEL_ID, value: {{ . | quote }}}
+            {{- end }}
+            {{- with .Values.slack.apiBase }}
+            - {name: PB_SLACK_API_BASE, value: {{ . | quote }}}
+            {{- end }}
             {{- end }}
             - {name: PB_ALLOW_GROUP_READ, value: "true"}      # the secret volume is group-readable because of fsGroup
             - {name: PB_LOCK_FILE, value: /state/lockdown}    # a file on the state volume: kept across a pod only with state.persistence
@@ -87,11 +108,24 @@ spec:
             {{- with .Values.hub.maxReplyBytes }}
             - {name: PB_MAX_REPLY_BYTES, value: {{ . | quote }}}
             {{- end }}
+            {{- if eq $kind "telegram" }}
             - name: TELEGRAM_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.botToken.secretName }}
                   key: {{ .Values.secrets.botToken.key }}
+            {{- else }}
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.slackBotToken.secretName }}
+                  key: {{ .Values.secrets.slackBotToken.key }}
+            - name: SLACK_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.slackAppToken.secretName }}
+                  key: {{ .Values.secrets.slackAppToken.key }}
+            {{- end }}
             {{- with .Values.hub.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

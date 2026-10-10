@@ -14,8 +14,8 @@ phone ── chat service ──> HUB (a small service in the cloud) <── Pub
 
 * The **agent** runs on the machine with the terminal. It opens **no listening port** and connects to **nothing but the
   message bus**. It does not know where the hub runs; it knows a project, a topic and a subscription.
-* The **hub** talks to the chat service (Telegram) and holds one encrypted session per agent. It can run anywhere that
-  can reach Telegram and Pub/Sub, for example a container in Kubernetes.
+* The **hub** talks to the chat service (Telegram, or Slack: see [Slack](#slack)) and holds one encrypted session per agent.
+  It can run anywhere that can reach the chat service and Pub/Sub, for example a container in Kubernetes.
 * Everything between hub and agent is **sealed and signed**: an authenticated handshake (pinned keys, X25519 and
   ML-KEM-768), then a double ratchet with a fresh key for every message. The bus operator sees ciphertext of uniform
   size. A forged, replayed, delayed or reordered message cannot make the agent type anything, and cannot break a live
@@ -201,6 +201,67 @@ Each machine runs its own agent with its own keys and a name. Where does your te
   machine that is not the chosen one is answered where it was asked. The hub remembers the last 512 messages for this; if it has forgotten the one you answered (after a restart, say) and there are several agents, it sends nothing and asks for `@name` or `/agent` instead of guessing.
 * Replies, notices and alarms carry `[name]` when there is more than one agent. `/lockdown` applies to all of them.
 
+## Slack
+
+The hub can talk to Slack instead of Telegram (`PB_CHAT=slack`). The rest does not change: the agent, the encryption between the
+hub and the agent, the queues and the files work the same, because the hub reaches the chat through one small interface. What
+differs is how you set it up and a few details of the chat.
+
+**Set up.** Make the app from a manifest, then give the hub two tokens and the id of the one user it obeys.
+
+1. Print the manifest and make the app (api.slack.com/apps, *Create New App*, *From a manifest*, paste the JSON). The manifest is made
+   from the commands the hub knows, so the two cannot drift apart; [deploy/slack/manifest.json](deploy/slack/manifest.json) is
+   its output with the defaults.
+
+   ```
+   bin/hub slack-manifest [-name petrvs-bridge] [-prefix pb-]
+   ```
+
+   It asks for the least the client uses: `chat:write`, `im:history`, `im:write`, `files:read`, `files:write`,
+   `reactions:write` and `commands`. Nothing reads channels, users or the workspace. Socket Mode, the *Messages* tab of the app
+   home and the `message.im` event are on.
+2. Install the app in the workspace (a workspace admin may have to approve it). Copy the **bot token** (*OAuth & Permissions*,
+   `xoxb-...`), and make an **app-level token** with the `connections:write` right (*Basic Information*, *App-Level Tokens*,
+   `xapp-...`).
+3. Find your user id (your profile, *Copy member ID*, like `U0123ABCD`) and run the hub:
+
+   ```
+   export SLACK_BOT_TOKEN=xoxb-... SLACK_APP_TOKEN=xapp-...     # or PB_SLACK_BOT_TOKEN_FILE and PB_SLACK_APP_TOKEN_FILE
+   PB_CHAT=slack PB_SLACK_USER_ID=U0123ABCD bin/hub
+   ```
+4. Open the app in Slack (*Apps*) and write to it. The agent needs no change: it does not know which chat the hub uses.
+
+**How it works.** The hub opens a WebSocket to Slack (Socket Mode), so it still listens on nothing and needs no address that Slack
+can reach. It obeys **one user in the direct message with the app** and counts and ignores everything else: other users, other
+channels, other workspaces (Slack Connect), edits, bots, files of other kinds. A message is acknowledged to Slack when it
+arrives (Slack sends it again otherwise) and handled once.
+
+**Commands.** Slack keeps the names of slash commands for the whole workspace, and some are Slack's own (`/status`, `/help`),
+so the app's commands carry a prefix: type `/pb-status`, `/pb-key 2`, `/pb-lockdown`, and so on. The hub's `/help` says so.
+Send a plain message and it goes to the session; a message that starts with a slash that is not a command of the app is
+refused by Slack's own client unless you choose *Send as message*.
+
+**What is different from Telegram.**
+
+* A button under a message works as in Telegram. A text shown after a tap (`AnswerCallback`) is shown to you privately.
+* Marks (`PB_DELIVERED_REACTION` and the others) must be one of the emoji of a short table that Slack has a name for
+  (👀 👍 👎 ✅ ❌ ⚠️ 🔥 ❤️ 🎉 🤔 and more; the hub lists them if you choose another); a new mark replaces the earlier one of the hub.
+* A file you send is fetched by the hub only from Slack's own address, with the bot token, and never larger than
+  `PB_MAX_FILE_BYTES`. A file the machine sends is uploaded with Slack's upload flow; Slack does not say which message it
+  became, so a reply to a file in a thread is not routed to the machine that sent it (a reply to a text message is). Buttons that
+  belong to a file come in a short message of their own right after it.
+* Text from the machine is escaped before it is sent: a `<!channel>` or `<@U123>` in a reply is shown as text and pings nobody,
+  and links are shown only when they are written as a Markdown link to http, https or mailto.
+* The hub does not unfurl links.
+* Edited messages are ignored: a message is obeyed as it was first written.
+* Slack keeps no events for a socket that is closed, and it closes and opens one every few hours. Whenever the hub opens the socket
+  again it reads back what you wrote since the last message it heard of, in order, so a blip loses nothing. A hub that is started
+  anew does not know that message and reads nothing back: what you wrote while it was down (a rollout takes about half a minute) is
+  lost, where Telegram keeps it for a day. Replaying old messages after a restart would be worse, since a command could run twice.
+  Likewise an event is acknowledged to Slack when it arrives; if the hub stops between that and its work, you send the message again.
+* A link written as `[https://good.example](https://evil.example)` is shown by its real address, since Slack would show only the
+  label.
+
 ## Alarm mode
 
 `/alarm on` arms the machine. While it is armed, any sign that someone touched it is reported to the chat at once:
@@ -231,10 +292,19 @@ unknown flag prints them too, and exits with 2).
 |---|---|---|---|
 | `PB_IDENTITY` | `-identity` | required | Path of the hub's private identity file (mode 0600) |
 | `PB_AGENTS_DIR` | `-agents-dir` | required | Directory with one `NAME.pub.json` per agent that may connect. Nobody else can |
-| `TELEGRAM_BOT_TOKEN` | none | required (or the next) | Bot token |
+| `PB_CHAT` | `-chat` | `telegram` | The chat service: `telegram` or `slack`. With `slack` the Telegram settings below are not used, and the Slack ones are required ([Slack](#slack)) |
+| `TELEGRAM_BOT_TOKEN` | none | required for Telegram (or the next) | Bot token |
 | `PB_TELEGRAM_TOKEN_FILE` | none | | File holding the bot token (mode 0600). Used if the variable above is unset |
-| `PB_CHAT_ID` | `-chat-id` | required | The only chat that is obeyed |
+| `PB_CHAT_ID` | `-chat-id` | required for Telegram | The only chat that is obeyed |
 | `PB_USER_ID` | `-user-id` | the chat id | The only user that is obeyed (in a private chat it equals the chat id) |
+| `SLACK_BOT_TOKEN` | none | required for Slack (or the next) | The bot token of the Slack app (`xoxb-...`) |
+| `PB_SLACK_BOT_TOKEN_FILE` | none | | File holding it (mode 0600). Used if the variable above is unset |
+| `SLACK_APP_TOKEN` | none | required for Slack (or the next) | The app-level token of Socket Mode (`xapp-...`, with `connections:write`) |
+| `PB_SLACK_APP_TOKEN_FILE` | none | | File holding it (mode 0600). Used if the variable above is unset |
+| `PB_SLACK_USER_ID` | `-slack-user` | required for Slack | The only Slack user that is obeyed, like `U0123ABCD` |
+| `PB_SLACK_CHANNEL_ID` | `-slack-channel` | unset | The direct message of that user with the app, like `D0123ABCD`. Unset, the hub asks Slack for it, which needs the `im:write` right |
+| `PB_SLACK_COMMAND_PREFIX` | `-slack-command-prefix` | `pb-` | Put before the names of the app's slash commands: `/pb-status` reaches the hub as `/status`. It must be the prefix of the manifest |
+| `PB_SLACK_API_BASE` | `-slack-api` | `https://slack.com/api` | The Web API address; plain http is accepted only for localhost (a test double) |
 | `PB_PROJECT` | `-project` | required unless the emulator is used; then `emulator` | Pub/Sub project id (`GOOGLE_CLOUD_PROJECT` is also read). With `PUBSUB_EMULATOR_HOST` set and no project, hub and agent both use `emulator`; set the same one on both if you set one |
 | `PB_PREFIX` | `-prefix` | `pb` | Prefix of topic and subscription names |
 | `PB_CREATE_RESOURCES` | `-create-resources` | `false` | Create topics and subscriptions. For development and the emulator only; create them with infrastructure code in production |

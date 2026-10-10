@@ -94,6 +94,11 @@ type Config struct {
 	FailedReaction string
 	// LockFile, if set, keeps a lockdown across restarts of the hub: it exists while the hub is locked down.
 	LockFile string
+	// ChatName names the chat in what the hub tells the user ("Telegram" by default, "Slack" for Slack).
+	ChatName string
+	// HelpNote, if set, is added to the list of commands the hub shows, for what is special about typing a command in this chat
+	// (in Slack a command is a slash command of the app, with a prefix).
+	HelpNote string
 }
 
 // maxPending is how many unproven sessions the hub keeps per agent. An agent repeats its hello until it is answered,
@@ -174,6 +179,9 @@ func New(cfg Config) (*Hub, error) {
 	}
 	if cfg.ChatID == 0 || cfg.UserID == 0 {
 		return nil, errors.New("hubsvc: chat id and user id are required")
+	}
+	if cfg.ChatName == "" {
+		cfg.ChatName = "Telegram"
 	}
 	if cfg.Names.Prefix == "" {
 		cfg.Names = wire.DefaultNames()
@@ -379,6 +387,14 @@ var menu = []telegram.Command{
 
 const baseHelp = "Known: /agents /agent [NAME] /enter /esc /up /down /tab /key N|btab /alarm on|off|status /lockdown /unlock"
 
+// help is the list of commands as this hub shows it: helpText, then the note of the chat (how to type a command there).
+func (h *Hub) help() string {
+	if h.cfg.HelpNote == "" {
+		return helpText
+	}
+	return helpText + "\n" + h.cfg.HelpNote
+}
+
 // helpText is the whole list: the base commands, the chat commands and the machine commands, then how to address an agent.
 var helpText = baseHelp + chatHelp + machineHelp + ", @name text (also @name /enter), or answer a message of an agent to write to that agent."
 
@@ -515,7 +531,7 @@ func (h *Hub) markLoop(ctx context.Context) {
 			case err == nil, ctx.Err() != nil:
 			case strings.Contains(err.Error(), "REACTION_INVALID"):
 				refused[m.emoji] = true
-				h.log.Warn("Telegram does not accept this reaction, it will not be used; choose another one in the settings", "reaction", m.emoji)
+				h.log.Warn("the chat does not accept this reaction, it will not be used; choose another one in the settings", "chat", h.cfg.ChatName, "reaction", m.emoji)
 			default:
 				h.log.Warn("could not mark a message", "err", err)
 			}
@@ -808,12 +824,12 @@ func (h *Hub) handleTo(ctx context.Context, text string, sentAt time.Time, re re
 		}
 		h.say(ctx, "The hub relays again. Agents that were locked stay locked until someone unlocks them on their own machine.")
 	case "/start", "/help":
-		h.say(ctx, helpText)
+		h.say(ctx, h.help())
 	default:
 		if h.chatCommand(ctx, cmd, arg, re, sentAt, msgID) || h.machineCommand(ctx, cmd, arg, re, sentAt, msgID) {
 			return
 		}
-		h.say(ctx, "Unknown command. "+helpText)
+		h.say(ctx, "Unknown command. "+h.help())
 	}
 }
 

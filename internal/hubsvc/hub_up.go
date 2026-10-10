@@ -516,7 +516,7 @@ func (h *Hub) upUpload(ctx context.Context, name, key string, fm upFileMeta, cap
 	if errors.As(err, &ae) && (ae.Code == 400 || ae.Code == 413) {
 		// Telegram will refuse the same file again; resending it for ever would only repeat the attempt.
 		h.log.Warn("the chat refuses a file, dropping it", "agent", name, "kind", kind, "bytes", len(data), "err", err)
-		return h.upDrop(ctx, name, key, fmt.Sprintf("⚠️ %s: Telegram refused the file %s (%s); it was not sent", name, fm.name, upShort(ae.Desc, 200)))
+		return h.upDrop(ctx, name, key, fmt.Sprintf("⚠️ %s: %s refused the file %s (%s); it was not sent", name, h.cfg.ChatName, fm.name, upShort(ae.Desc, 200)))
 	}
 	// A rate limit, a server error, no answer: the file is kept for the resend of the closing item, a few times.
 	now := h.cfg.Now()
@@ -538,7 +538,7 @@ func (h *Hub) upUpload(ctx context.Context, name, key string, fm upFileMeta, cap
 	h.log.Warn("giving up on uploading a file", "agent", name, "kind", kind, "bytes", len(data), "err", err)
 	// No verdict is kept here: the file is still in `ready`, so when the chat cannot take the words either, the next resend
 	// tries the upload again (which may well work by then) before it gives up again.
-	if !h.upTell(ctx, name, fmt.Sprintf("⚠️ %s: Telegram did not take the file %s after several tries; send it again", name, fm.name)) {
+	if !h.upTell(ctx, name, fmt.Sprintf("⚠️ %s: %s did not take the file %s after several tries; send it again", name, h.cfg.ChatName, fm.name)) {
 		return false
 	}
 	u.mu.Lock()

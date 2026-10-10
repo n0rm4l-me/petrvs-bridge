@@ -68,6 +68,27 @@ kubectl -n bridge create secret generic petrvs-bridge-hub-identity --from-file=h
 
 The agents' public bundles (`NAME.pub.json`) go into the chart's `agents.files`; they are not secret.
 
+### Slack instead of Telegram
+
+With `hub.chat: slack` the hub reads two other tokens and the id of one Slack user, and needs no Telegram setting. The agents do not
+change. Make the app first: `hub slack-manifest` prints its manifest (the README, "Slack", has the steps).
+
+1. Put the **bot token** (`xoxb-...`) and the **app-level token** (`xapp-...`, right `connections:write`) into the secret store as two
+   entries, and give the chart their names (`secrets.slackBotToken.externalSecret.remoteKey`,
+   `secrets.slackAppToken.externalSecret.remoteKey`); or make the two Secrets by hand, with the key `token` in each
+   (`secrets.slackBotToken.secretName`, `secrets.slackAppToken.secretName`).
+2. Set `hub.chat: slack` and `slack.userId` (a quoted string like `"U0123ABCD"`); `slack.channelId` is optional (without it the hub asks
+   Slack for the direct message, which needs the `im:write` right, which the manifest has). `slack.commandPrefix` must be the prefix of
+   the manifest (`pb-` unless you changed it with `-prefix`). `hub.chatId` is not used.
+3. The network policy of the chart needs nothing more: the hub connects outward, over HTTPS (port 443), to `slack.com`, to the
+   address of the socket that Slack gives (`wss-*.slack.com`) and to `files.slack.com` for files, and Slack never connects to the
+   hub. As for Telegram, the chart allows HTTPS to public addresses and not to the private ranges when `allowPrivateRanges` is false.
+4. The hub is ready when the socket to Slack is up (the probes read the same files as for Telegram). A hub that cannot reach Slack for a
+   minute stops being ready and says so in its log; it keeps trying with growing waits.
+
+Tokens are rotated by changing the entries of the store and restarting the hub (the Secrets are read at start). Reinstalling the app
+in Slack issues a new bot token and revokes the old one.
+
 ## 5. The chart
 
 ```sh

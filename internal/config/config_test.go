@@ -568,3 +568,120 @@ func TestAWrongPullIsAnErrorAndNotASilentFallback(t *testing.T) {
 		t.Errorf("an empty PB_PULL: %v %+v", err, a)
 	}
 }
+
+const (
+	testBotToken = "xoxb-1234567890-abcdefghij"
+	testAppToken = "xapp-1-A0123456-7890123-abcdefghij"
+)
+
+func slackEnv() map[string]string {
+	return map[string]string{"PB_PROJECT": "p", "PB_IDENTITY": "/x/hub.identity.json", "PB_AGENTS_DIR": "/x/agents", "PB_CHAT": "slack",
+		"SLACK_BOT_TOKEN": testBotToken, "SLACK_APP_TOKEN": testAppToken, "PB_SLACK_USER_ID": "U0123ABCD"}
+}
+
+func TestTheChatIsTelegramUnlessSlackIsChosen(t *testing.T) {
+	h, err := ParseHub(nil, envOf(hubEnv()))
+	if err != nil || h.Chat != "telegram" {
+		t.Fatalf("%v %+v", err, h)
+	}
+	h, err = ParseHub(nil, envOf(slackEnv()))
+	if err != nil || h.Chat != "slack" {
+		t.Fatalf("%v %+v", err, h)
+	}
+	if h.SlackBotToken != testBotToken || h.SlackAppToken != testAppToken || h.SlackUserID != "U0123ABCD" || h.SlackCommandPrefix != "pb-" ||
+		h.SlackChannelID != "" || h.SlackAPIBase != "https://slack.com/api" || h.ChatID == 0 || h.UserID == 0 {
+		t.Fatalf("%+v", h)
+	}
+	e := hubEnv()
+	e["PB_CHAT"] = "irc"
+	if _, err := ParseHub(nil, envOf(e)); err == nil || !strings.Contains(err.Error(), "chat:") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestSlackNeedsNoTelegramSettingsAndTelegramNeedsNoSlackOnes(t *testing.T) {
+	e := slackEnv() // no PB_CHAT_ID, no Telegram token
+	if _, err := ParseHub(nil, envOf(e)); err != nil {
+		t.Fatal(err)
+	}
+	e["PB_CHAT_ID"] = "4242" // left over from Telegram: harmless, and not taken for the Slack user
+	h, err := ParseHub(nil, envOf(e))
+	if err != nil || h.UserID == 4242 {
+		t.Fatalf("%v %+v", err, h)
+	}
+	if _, err := ParseHub(nil, envOf(hubEnv())); err != nil { // no Slack settings
+		t.Fatal(err)
+	}
+}
+
+func TestSlackSettingsAreCheckedAndNeverEchoTheTokens(t *testing.T) {
+	for name, mut := range map[string]func(map[string]string){
+		"no bot token":        func(e map[string]string) { delete(e, "SLACK_BOT_TOKEN") },
+		"no app token":        func(e map[string]string) { delete(e, "SLACK_APP_TOKEN") },
+		"tokens swapped":      func(e map[string]string) { e["SLACK_BOT_TOKEN"], e["SLACK_APP_TOKEN"] = testAppToken, testBotToken },
+		"a user token":        func(e map[string]string) { e["SLACK_BOT_TOKEN"] = "xoxp-1234567890-abcdefghij" },
+		"no user":             func(e map[string]string) { delete(e, "PB_SLACK_USER_ID") },
+		"a channel as user":   func(e map[string]string) { e["PB_SLACK_USER_ID"] = "C0123ABCD" },
+		"a public channel":    func(e map[string]string) { e["PB_SLACK_CHANNEL_ID"] = "C0123ABCD" },
+		"plain http api":      func(e map[string]string) { e["PB_SLACK_API_BASE"] = "http://slack.example.com/api" },
+		"a bad prefix":        func(e map[string]string) { e["PB_SLACK_COMMAND_PREFIX"] = "No Spaces" },
+		"an unknown emoji":    func(e map[string]string) { e["PB_DELIVERED_REACTION"] = "🦄" },
+		"a Telegram-only one": func(e map[string]string) { e["PB_FAILED_REACTION"] = "🤡" },
+	} {
+		e := slackEnv()
+		mut(e)
+		_, err := ParseHub(nil, envOf(e))
+		if err == nil {
+			t.Errorf("%s: accepted", name)
+			continue
+		}
+		for _, s := range []string{testBotToken, testAppToken, "xoxp-1234567890-abcdefghij"} {
+			if strings.Contains(err.Error(), s) {
+				t.Errorf("%s: the error holds a token: %v", name, err)
+			}
+		}
+	}
+	_, stderr := capture(t)
+	e := slackEnv()
+	delete(e, "SLACK_BOT_TOKEN")
+	for _, args := range [][]string{{"-slack-bot-token", testBotToken}, {"-slack-app-token=" + testAppToken}, {"-bot-token", testBotToken}} {
+		if _, err := ParseHub(args, envOf(e)); err == nil {
+			t.Errorf("a token flag %v was accepted", args)
+		}
+	}
+	if strings.Contains(stderr.String(), testBotToken) || strings.Contains(stderr.String(), testAppToken) {
+		t.Fatalf("the usage echoes a token:\n%s", stderr)
+	}
+}
+
+func TestSlackTokensFromFilesNeedPrivatePermissions(t *testing.T) {
+	dir := t.TempDir()
+	bot, app := filepath.Join(dir, "bot"), filepath.Join(dir, "app")
+	os.WriteFile(bot, []byte(testBotToken+"\n"), 0o644)
+	os.WriteFile(app, []byte(testAppToken+"\n"), 0o600)
+	e := slackEnv()
+	delete(e, "SLACK_BOT_TOKEN")
+	delete(e, "SLACK_APP_TOKEN")
+	e["PB_SLACK_BOT_TOKEN_FILE"], e["PB_SLACK_APP_TOKEN_FILE"] = bot, app
+	if _, err := ParseHub(nil, envOf(e)); err == nil || !strings.Contains(err.Error(), "readable by other users") {
+		t.Fatalf("a world-readable token file was accepted: %v", err)
+	}
+	os.Chmod(bot, 0o600)
+	h, err := ParseHub(nil, envOf(e))
+	if err != nil || h.SlackBotToken != testBotToken || h.SlackAppToken != testAppToken {
+		t.Fatalf("%v %+v", err, h)
+	}
+	// a file that holds the wrong kind of token is refused without printing it
+	os.WriteFile(bot, []byte(testAppToken), 0o600)
+	if _, err := ParseHub(nil, envOf(e)); err == nil || strings.Contains(err.Error(), testAppToken) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestSlackReactionsOfTheTable(t *testing.T) {
+	e := slackEnv()
+	e["PB_RECEIVED_REACTION"], e["PB_DELIVERED_REACTION"], e["PB_FAILED_REACTION"] = "👍", "✅", "off"
+	if h, err := ParseHub(nil, envOf(e)); err != nil || h.ReceivedReaction != "👍" || h.FailedReaction != "" {
+		t.Fatalf("%v %+v", err, h)
+	}
+}

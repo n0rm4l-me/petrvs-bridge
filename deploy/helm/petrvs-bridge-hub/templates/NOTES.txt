@@ -1,9 +1,18 @@
-The hub {{ include "hub.fullname" . }} is installed. It listens on nothing; it talks to Telegram and to Pub/Sub.
+The hub {{ include "hub.fullname" . }} is installed. It listens on nothing; it talks to {{ if eq (.Values.hub.chat | default "telegram") "slack" }}Slack (Socket Mode, outward){{ else }}Telegram{{ end }} and to Pub/Sub.
 
 Before it can work, these must exist:
 
-1. Secrets (never in the values), each of the two on its own:
-{{- if .Values.secrets.botToken.externalSecret.remoteKey }}
+1. Secrets (never in the values), each on its own:
+{{- if eq (.Values.hub.chat | default "telegram") "slack" }}
+{{- range $s := list .Values.secrets.slackBotToken .Values.secrets.slackAppToken }}
+{{- if $s.externalSecret.remoteKey }}
+     {{ $s.secretName }}: made by an ExternalSecret of this release from the entry {{ $s.externalSecret.remoteKey }} of the secret store
+       {{ $.Values.externalSecrets.secretStore.name }}; a person must have put a value in the entry first.
+{{- else }}
+     kubectl --context CONTEXT --namespace {{ $.Release.Namespace }} create secret generic {{ $s.secretName }} --from-file={{ $s.key }}=/path/to/token-file
+{{- end }}
+{{- end }}
+{{- else if .Values.secrets.botToken.externalSecret.remoteKey }}
      {{ .Values.secrets.botToken.secretName }}: made by an ExternalSecret of this release from the entry {{ .Values.secrets.botToken.externalSecret.remoteKey }} of the secret store
        {{ .Values.externalSecrets.secretStore.name }}; a person must have put a value in the entry first.
 {{- else }}
