@@ -1,40 +1,132 @@
-# petrvs-bridge
+<p align="center">
+  <img src="docs/assets/petrvs.jpg" alt="PETRVS: a banner over a chain and two crossed keys" width="480">
+</p>
 
-Control an AI coding assistant that runs in a terminal from your phone, through a chat app, with a cloud message bus in
-the middle and end-to-end encryption between the two ends.
+<h1 align="center">petrvs-bridge</h1>
 
-The name is a nod to Saint Peter (Latin *Petrvs*), the keeper of the keys: the hub and each agent pin one another's keys,
-and nothing else gets through the gate.
+<p align="center">
+  <b>Control a terminal AI assistant from your phone.</b><br>
+  A chat app on one side, a tmux session with Claude Code on the other, and a cloud message bus in the middle,<br>
+  with end-to-end encryption between the two ends.
+</p>
 
-```
-phone ── chat service ──> HUB (a small service in the cloud) <── Pub/Sub, encrypted ──> AGENT (next to the tmux session)
-                                                                                         │
-                                                                                         └─ types into tmux, sends replies back
+<p align="center">
+  <a href="https://github.com/n0rm4l-me/petrvs-bridge/actions/workflows/ci.yml"><img src="https://github.com/n0rm4l-me/petrvs-bridge/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+</p>
+
+*The name is a nod to Saint Peter (Latin* Petrvs*), the keeper of the keys: the hub and each agent pin one another's keys,
+and nothing else gets through the gate.*
+
+> **Status:** working and tested (unit tests, fuzzing, end-to-end tests on the Pub/Sub emulator, and a smoke test with the
+> real binaries, a real tmux and a fake chat server). It is young, the protocol is custom, and it has **not had an
+> independent security audit**. Read [Security at a glance](#security-at-a-glance) and [Limitations](#limitations) before
+> trusting it with anything that matters.
+
+**Contents:** [How it works](#how-it-works) · [Features](#features) · [Security at a glance](#security-at-a-glance) ·
+[Quick start](#quick-start) · [Documentation](#documentation) · [Chat commands](#chat-commands) ·
+[Several machines](#several-machines) · [Slack](#slack) · [Alarm mode](#alarm-mode) ·
+[Configuration reference](#configuration-reference) · [Message bus resources](#message-bus-resources) · [Hooks](#hooks) ·
+[Development](#development) · [Limitations](#limitations)
+
+## How it works
+
+```mermaid
+flowchart LR
+    you["📱 You<br/>phone or desktop"]
+    chat["💬 Chat service<br/>Telegram or Slack"]
+
+    subgraph cloud["Cloud: anywhere that can reach the chat service and Pub/Sub"]
+        hub["🏛️ Hub<br/>one encrypted session per agent"]
+        bus[("Pub/Sub<br/>topics and subscriptions")]
+    end
+
+    subgraph machine["Your machine"]
+        agent["🔑 Agent<br/>no listening port"]
+        tmux["⌨️ tmux session<br/>Claude Code or another assistant"]
+    end
+
+    you <-->|"messages, taps"| chat
+    chat <-->|"bot API"| hub
+    hub <-->|"sealed and signed<br/>ciphertext only"| bus
+    bus <-->|"outbound only"| agent
+    agent -->|"types text and keys"| tmux
+    tmux -->|"hooks: replies and prompts"| agent
 ```
 
 * The **agent** runs on the machine with the terminal. It opens **no listening port** and connects to **nothing but the
   message bus**. It does not know where the hub runs; it knows a project, a topic and a subscription.
-* The **hub** talks to the chat service (Telegram, or Slack: see [Slack](#slack)) and holds one encrypted session per agent.
-  It can run anywhere that can reach the chat service and Pub/Sub, for example a container in Kubernetes.
+* The **hub** talks to the chat service (Telegram, or Slack: see [Slack](#slack)) and holds one encrypted session per
+  agent. It can run anywhere that can reach the chat service and Pub/Sub, for example a container in Kubernetes.
 * Everything between hub and agent is **sealed and signed**: an authenticated handshake (pinned keys, X25519 and
-  ML-KEM-768), then a double ratchet with a fresh key for every message. The bus operator sees ciphertext of uniform
-  size. A forged, replayed, delayed or reordered message cannot make the agent type anything, and cannot break a live
-  session.
-* The chat leg is **not** end-to-end encrypted (bot chats never are): the hub sees the plain text. Design accordingly, see
-  [docs/SECURITY.md](docs/SECURITY.md).
+  ML-KEM-768), then a double ratchet with a fresh key for every message. The bus operator sees ciphertext of uniform size.
 
-Besides text and keys, the bridge shows the prompt that Claude Code waits on (the command, the numbered choices) with a
-button for each choice; sends files and screenshots from the machine to the chat and takes photos and documents from the
-chat to the machine; shows the state of each machine (battery, disk, uptime, what runs in tmux); starts Claude Code again
-when it stops; and says so when a request has had no reply for too long.
+### One message, end to end
 
-Status: working and tested (unit tests, fuzzing, end-to-end tests on the Pub/Sub emulator, and a smoke test with the real
-binaries, a real tmux and a fake chat server). It is young, the protocol is custom, and it has **not had an independent
-security audit**. Read the limitations before trusting it with anything that matters.
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as You
+    participant C as Chat service
+    participant H as Hub
+    participant B as Pub/Sub
+    participant A as Agent
+    participant T as tmux
 
-## Quick start on one machine (Pub/Sub emulator)
+    Note over H,A: Handshake first: pinned keys, X25519 and ML-KEM-768, then a double ratchet
+    U->>C: "run the tests"
+    C->>H: bot update
+    H->>B: sealed command
+    B->>A: sealed command
+    A->>T: types the text, then Enter
+    T-->>A: the assistant answers (a hook queues the reply)
+    A->>B: sealed reply
+    B->>H: sealed reply
+    H->>C: the reply, with buttons when a prompt waits
+    C->>U: message
+    H-->>A: delivery receipt, so the agent forgets the reply
+```
 
-You need Go 1.26.6 or newer, tmux, and for the emulator `gcloud` with `gcloud components install pubsub-emulator` (and Java). Go 1.21 and later fetch the toolchain named in `go.mod` by themselves when theirs is older, unless `GOTOOLCHAIN=local` is set: the official `golang` Docker images set it, so a build there with an older image stops with `go.mod requires go >= 1.26.6` (the hub's Dockerfile sets `GOTOOLCHAIN=auto` for that reason).
+A reply that is not confirmed stays in the agent's queue and is sent again, so a restart of the hub or a gap in the network
+does not lose it.
+
+## Features
+
+| | |
+|---|---|
+| **Talk to the assistant** | The text you send is typed into the tmux session; what the assistant answers comes back to the chat through a hook. A swipe-reply to a message of an agent goes to that agent. |
+| **Answer prompts with buttons** | The command and the numbered choices that the assistant waits on are shown with a button for each choice; `/screen` shows the screen on request. |
+| **Several machines** | One hub, many agents, one encrypted session each. Address one with `@name`. |
+| **Files both ways** | Files and screenshots from the machine to the chat; photos and documents from the chat into the machine's inbox. |
+| **Know the state** | A card per machine: online or not, battery, disk, uptime, what runs in tmux, the permission mode, the queue, the lock and the alarm. |
+| **Keep it running** | Auto-heal starts the assistant again when it stops or its session is gone (the command is configurable with `PB_ASSISTANT_COMMAND`). A request that has had no reply for too long is reported. |
+| **Safety switches** | `/lockdown` locks every machine from the chat; only `agent unlock` on the machine lifts it. Alarm mode watches for input at the machine and, with a secret configured, needs a one-time code to disarm. |
+| **Telegram or Slack** | The hub speaks to one chat service at a time. |
+
+## Security at a glance
+
+| Leg | How it is protected | Who can read the plain text |
+|---|---|---|
+| You, the chat service, the hub | The chat service's own transport. Bot chats are never end-to-end encrypted. | The chat service and the hub |
+| Hub and agent, through Pub/Sub | Pinned keys, an X25519 and ML-KEM-768 handshake, a double ratchet, ciphertext of uniform size | Nobody in between; the bus operator sees ciphertext only |
+| Agent and tmux | Local file modes and the allow-list of keys the agent will press | The user of the machine |
+
+A forged, replayed, delayed or reordered message cannot make the agent type anything, and cannot break a live session.
+The chat leg is **not** end-to-end encrypted, so design accordingly. The details are in
+[docs/SECURITY.md](docs/SECURITY.md) and [docs/PROTOCOL.md](docs/PROTOCOL.md).
+
+## Quick start
+
+On one machine, with the Pub/Sub emulator. You need Go 1.26.6 or newer, tmux, and for the emulator `gcloud` with
+`gcloud components install pubsub-emulator` (and Java).
+
+<details>
+<summary>Go toolchain note</summary>
+
+Go 1.21 and later fetch the toolchain named in `go.mod` by themselves when theirs is older, unless `GOTOOLCHAIN=local` is
+set. The official `golang` Docker images set it, so a build there with an older image stops with
+`go.mod requires go >= 1.26.6` (the hub's Dockerfile sets `GOTOOLCHAIN=auto` for that reason).
+
+</details>
 
 ```sh
 make build                                   # bin/hub bin/agent bin/bridgekeys
@@ -60,6 +152,17 @@ PB_NAME=laptop PB_IDENTITY=keys/laptop.identity.json PB_HUB_PUB=keys/hub.pub.jso
 
 Write to the bot. The text is typed into the `claude` session; replies that a hook queues with `agent send` come back to
 the chat. See [examples/claude-stop-hook.sh](examples/claude-stop-hook.sh) for a Claude Code hook that does that.
+
+## Documentation
+
+| Where | What is in it |
+|---|---|
+| [docs/PROTOCOL.md](docs/PROTOCOL.md) | The wire protocol: identities, handshake, ratchet, framing, payloads, files, liveness, lockdown |
+| [docs/SECURITY.md](docs/SECURITY.md) | What is and is not protected, the rules the code follows, the tests that correspond to attacks, how to report a problem |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | Deploying the hub: the image, Pub/Sub, workload identity, secrets and keys, the Helm chart, the agent |
+| [deploy/terraform](deploy/terraform/README.md) | Terraform for the cloud side of the hub |
+| [examples/](examples) | Claude Code hooks, systemd and launchd units, an alert for attaching to the tmux session |
+| The sections below | Chat commands, several machines, Slack, alarm mode, every setting, hooks, development, limitations |
 
 ## Chat commands
 
