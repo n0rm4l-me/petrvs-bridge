@@ -2,7 +2,8 @@
 #   docker buildx build --platform linux/amd64 -f deploy/hub.Dockerfile -t petrvs-bridge-hub .
 # Use --platform linux/arm64 for arm64 nodes. Without --platform the image is built for the machine that builds it, so
 # one made on an Apple silicon Mac is arm64 and does not start on amd64 nodes ("exec format error").
-# NOT YET BUILT OR RUN INSIDE A CONTAINER: a starting point. The final base image is pinned by digest; pin the golang image of the build stage too before you use it.
+# The CI pipeline builds this file on every push (the job "Hub image"); nothing here runs it in a cluster. The final base image is
+# pinned by digest; pin the golang image of the build stage too before you use it.
 
 # The Go compiler cross-compiles, so the build stage always runs on the builder's own architecture (no emulation) and
 # only the binary is made for the target.
