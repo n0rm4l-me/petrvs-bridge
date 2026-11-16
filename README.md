@@ -12,6 +12,7 @@
 
 <p align="center">
   <a href="https://github.com/n0rm4l-me/petrvs-bridge/actions/workflows/ci.yml"><img src="https://github.com/n0rm4l-me/petrvs-bridge/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="license: Apache-2.0"></a>
 </p>
 
 *The name is a nod to Saint Peter (Latin* Petrvs*), the keeper of the keys: the hub and each agent pin one another's keys,
@@ -26,7 +27,7 @@ and nothing else gets through the gate.*
 [Quick start](#quick-start) · [Documentation](#documentation) · [Chat commands](#chat-commands) ·
 [Several machines](#several-machines) · [Slack](#slack) · [Alarm mode](#alarm-mode) ·
 [Configuration reference](#configuration-reference) · [Message bus resources](#message-bus-resources) · [Hooks](#hooks) ·
-[Development](#development) · [Limitations](#limitations)
+[Development](#development) · [Limitations](#limitations) · [License](#license)
 
 ## How it works
 
@@ -664,4 +665,9 @@ payloads), `internal/transport` (Pub/Sub and an in-memory bus with attack helper
 * `examples/` and `deploy/` are provided as starting points; the Kubernetes and systemd files have not been run.
 * A flood of forged packets with new keys is cut off cheaply, but while the receiver's budget of new-key agreements
   (20 burst, 5 a second) is empty a real message that needs a new key is refused until it refills. The session is not harmed.
-* No license has been chosen yet. Choose one before publishing.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
+
+Copyright 2026 n0rm4l-me
