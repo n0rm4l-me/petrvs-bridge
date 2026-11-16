@@ -168,6 +168,7 @@ func TestForgedFloodNeverBreaksTheSession(t *testing.T) {
 			break
 		}
 	}
+	before := a.Agent.Stats().Rejected
 	for i := 0; i < 300; i++ {
 		data := append(append([]byte{wire.Version}, sid...), junk(1200)...)
 		if i%2 == 0 {
@@ -180,7 +181,10 @@ func TestForgedFloodNeverBreaksTheSession(t *testing.T) {
 		r.Mem.Inject(r.Names.AgentSub("laptop"), junk(50+i), wire.Attrs(wire.KindMsg, "laptop"))
 		r.Mem.Inject(r.Names.AgentSub("laptop"), junk(50+i), map[string]string{"kind": "weird"})
 	}
-	r.Eventually("junk rejected", func() bool { return a.Agent.Stats().Rejected >= 600 })
+	// Three forged packets reach the agent in each round, 900 in all, and every one is counted. Wait for all of them, not for most:
+	// the handlers run at once, and a forgery that is still being handled when the real message arrives takes a token of the
+	// budget of new keys before the real message can (on a slow runner a third of the flood was still on its way).
+	r.Eventually("junk rejected", func() bool { return a.Agent.Stats().Rejected-before >= 900 })
 	// The agent reported "before" as done, so the hub's next message carries a new key, and the flood has used up the
 	// agent's budget of new-key agreements (20 at once, then 5 a second). A real message that needs a new key is refused
 	// until the budget has refilled (see the limitations); the session itself is not harmed, which is what this checks.
