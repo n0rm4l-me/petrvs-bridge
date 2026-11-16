@@ -117,7 +117,7 @@ The chat leg is **not** end-to-end encrypted, so design accordingly. The details
 
 ## Quick start
 
-On one machine, with the Pub/Sub emulator. You need Go 1.26.6 or newer, tmux, and for the emulator `gcloud` with
+On one machine, with the Pub/Sub emulator. You need Go 1.26.11 or newer, tmux, and for the emulator `gcloud` with
 `gcloud components install pubsub-emulator` (and Java).
 
 <details>
@@ -125,7 +125,7 @@ On one machine, with the Pub/Sub emulator. You need Go 1.26.6 or newer, tmux, an
 
 Go 1.21 and later fetch the toolchain named in `go.mod` by themselves when theirs is older, unless `GOTOOLCHAIN=local` is
 set. The official `golang` Docker images set it, so a build there with an older image stops with
-`go.mod requires go >= 1.26.6` (the hub's Dockerfile sets `GOTOOLCHAIN=auto` for that reason).
+`go.mod requires go >= 1.26.11` (the hub's Dockerfile sets `GOTOOLCHAIN=auto` for that reason).
 
 </details>
 

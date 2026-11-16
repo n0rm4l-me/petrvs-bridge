@@ -10,7 +10,7 @@ FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 ARG TARGETOS
 ARG TARGETARCH
 # The official golang image sets GOTOOLCHAIN=local, so an image older than the `go` line of go.mod (a cached or mirrored
-# 1.26.x, for example) stops with "go.mod requires go >= 1.26.6". With auto, Go fetches the toolchain that go.mod names.
+# 1.26.x, for example) stops with "go.mod requires go >= 1.26.11". With auto, Go fetches the toolchain that go.mod names.
 ENV GOTOOLCHAIN=auto
 WORKDIR /src
 COPY go.mod go.sum ./
