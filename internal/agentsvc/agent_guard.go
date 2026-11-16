@@ -11,18 +11,18 @@ type typeBlock int
 
 const (
 	typeFree   typeBlock = iota // nothing is known against it
-	typeShell                   // a shell, not Claude Code, is in the foreground
-	typePrompt                  // Claude Code shows a dialog with numbered choices
+	typeShell                   // a shell, not the assistant, is in the foreground
+	typePrompt                  // the assistant shows a dialog with numbered choices
 )
 
 // typingBlock looks at the pane before a line of text is typed into it. Two things go wrong otherwise:
-//   - Claude Code has exited and a shell prompt is in the foreground: the shell would run the words as a command;
+//   - the assistant has exited and a shell prompt is in the foreground: the shell would run the words as a command;
 //   - a dialog with numbered choices is on the screen: the text is typed into it and the Enter that follows picks the
 //     highlighted choice, usually "1. Yes".
 //
 // The check needs the screen interface: without it, or when tmux cannot be asked, nothing is known and the text goes on
-// (the typing then fails by itself if the session is gone). A pane that shows a shell as its program but looks like Claude
-// Code's own screen (a wrapper script) is given the text, as auto-heal would not type into it either.
+// (the typing then fails by itself if the session is gone). A pane that shows a shell as its program but looks like the
+// assistant's own screen (a wrapper script) is given the text, as auto-heal would not type into it either.
 func (a *Agent) typingBlock(ctx context.Context) typeBlock {
 	if a.cfg.Screen == nil {
 		return typeFree
@@ -34,7 +34,7 @@ func (a *Agent) typingBlock(ctx context.Context) typeBlock {
 	cctx, cancel := context.WithTimeout(ctx, paneTimeout)
 	defer cancel()
 	scr, err := a.cfg.Screen.Capture(cctx)
-	if st.kind == paneShell && (err != nil || !looksLikeClaudeCode(scr)) {
+	if st.kind == paneShell && (err != nil || !looksLikeAssistantCode(scr)) {
 		return typeShell
 	}
 	if err == nil {
@@ -45,11 +45,20 @@ func (a *Agent) typingBlock(ctx context.Context) typeBlock {
 	return typeFree
 }
 
+// assistantName returns what the chat calls the assistant.
+func (a *Agent) assistantName() string {
+	n := a.cfg.Ext.AssistantName
+	if n == "" {
+		n = "Claude Code"
+	}
+	return n
+}
+
 // checkTextTarget stops a text from the chat from being typed into a shell or into a dialog.
 func (a *Agent) checkTextTarget(ctx context.Context) error {
 	switch a.typingBlock(ctx) {
 	case typeShell:
-		return &userError{"refused: a shell, not Claude Code, is in the foreground of the session, so the text was not typed (it would have been run as a command). /continue starts Claude Code."}
+		return &userError{"refused: a shell, not " + a.assistantName() + ", is in the foreground of the session, so the text was not typed (it would have been run as a command). /continue starts " + a.assistantName() + "."}
 	case typePrompt:
 		return &userError{"a prompt is waiting for an answer, so the text was not typed: answer it with the buttons or /key N (/screen shows it), then send the text again"}
 	}
@@ -61,9 +70,9 @@ func (a *Agent) checkTextTarget(ctx context.Context) error {
 func (a *Agent) checkFileLine(ctx context.Context) error {
 	switch a.typingBlock(ctx) {
 	case typeShell:
-		return &userError{"the file was saved in the inbox, but a shell, not Claude Code, is in the foreground of the session, so the session was not told about it (the line would have been run as a command). /continue starts Claude Code."}
+		return &userError{"the file was saved in the inbox, but a shell, not " + a.assistantName() + ", is in the foreground of the session, so the session was not told about it (the line would have been run as a command). /continue starts " + a.assistantName() + "."}
 	case typePrompt:
-		return &userError{"the file was saved in the inbox, but a prompt is waiting for an answer, so the session was not told about it: answer the prompt with the buttons or /key N (/screen shows it), then tell Claude Code about the file"}
+		return &userError{"the file was saved in the inbox, but a prompt is waiting for an answer, so the session was not told about it: answer the prompt with the buttons or /key N (/screen shows it), then tell " + a.assistantName() + " about the file"}
 	}
 	return nil
 }

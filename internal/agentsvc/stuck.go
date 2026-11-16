@@ -15,7 +15,7 @@ import (
 )
 
 // The stuck-request signal: a text from the chat starts a clock, the assistant's reply stops it. When the clock runs out
-// the chat is told, at most three times, unless Claude Code is waiting for the user's answer to a prompt.
+// the chat is told, at most three times, unless the assistant is waiting for the user's answer to a prompt.
 
 const (
 	stuckPoll      = 30 * time.Second
@@ -35,14 +35,16 @@ type stuckReq struct {
 	last    time.Time // when the last alert was queued
 }
 
-// localCommands are Claude Code's own commands that do their work without a turn of the assistant, so that no reply
+// localCommands are the assistant's own commands that do their work without a turn of the assistant, so that no reply
 // follows and no clock must start. (A custom command or a skill does run a turn, and is not listed.)
 var localCommands = map[string]bool{"clear": true, "compact": true, "resume": true, "help": true, "exit": true, "quit": true,
 	"model": true, "config": true, "status": true, "cost": true, "usage": true, "doctor": true, "login": true, "logout": true,
 	"mcp": true, "memory": true, "permissions": true, "vim": true, "agents": true, "hooks": true, "ide": true, "context": true,
 	"theme": true, "rewind": true, "export": true, "output-style": true, "statusline": true, "bug": true, "feedback": true,
 	"add-dir": true, "terminal-setup": true, "release-notes": true, "todos": true, "privacy-settings": true, "upgrade": true,
-	"bashes": true, "plugin": true, "fast": true, "copy": true, "stats": true}
+	"bashes": true, "plugin": true, "fast": true, "copy": true, "stats": true,
+	// OpenCode's own commands
+	"/": true, "ask": true, "cmd": true, "edit": true, "new": true, "open": true, "run": true, "task": true}
 
 // startsRequest says whether a text typed from the chat asks the assistant for something, so that a reply is due.
 func startsRequest(body string) bool {
@@ -50,7 +52,7 @@ func startsRequest(body string) bool {
 	if t == "" {
 		return false
 	}
-	if strings.HasPrefix(t, "!") { // Claude Code's bash mode runs the command itself: no turn of the assistant follows
+	if strings.HasPrefix(t, "!") { // the assistant's bash mode runs the command itself: no turn of the assistant follows
 		return false
 	}
 	if rest, ok := strings.CutPrefix(t, "/"); ok {
@@ -216,9 +218,9 @@ func (a *Agent) stuckTick(ctx context.Context) {
 			if _, ok := screen.ExtractPrompt(scr); ok {
 				return // the user has a prompt to answer: that is why there is no reply
 			}
-			state = "Claude Code looks idle."
+			state = a.assistantName() + " looks idle."
 			if screen.Busy(scr) {
-				state = "Claude Code looks busy."
+				state = a.assistantName() + " looks busy."
 			}
 		case errors.Is(err, screen.ErrNoSession):
 			state = "The tmux session is gone."

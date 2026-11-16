@@ -16,13 +16,13 @@ import (
 	"github.com/n0rm4l-me/petrvs-bridge/internal/sysinfo"
 )
 
-// Auto-heal: when Claude Code has stopped, or the tmux session it ran in is gone, the agent starts it again, but not in
+// Auto-heal: when the assistant has stopped, or the tmux session it ran in is gone, the agent starts it again, but not in
 // a loop, not while the owner may be restarting it by hand, and not on a machine that is locked.
 
 const (
-	defaultClaudeCommand = "claude --continue"
-	defaultHealTries     = 3
-	defaultHealWindow    = 10 * time.Minute
+	defaultAssistantCommand = "claude --continue"
+	defaultHealTries        = 3
+	defaultHealWindow       = 10 * time.Minute
 
 	healPoll = 5 * time.Second
 	minPoll  = 20 * time.Millisecond
@@ -46,8 +46,8 @@ func pollEvery(max, span time.Duration) time.Duration {
 }
 
 // isShell says whether prog, as tmux names the program in the foreground of the pane, shows that the pane has been left
-// at a prompt. Anything else counts as Claude Code: it appears under the names claude, node and its version number,
-// depending on how it was installed.
+// at a prompt. Anything else counts as the assistant: it appears under the names claude, opencode, node and its version
+// number, depending on how it was installed.
 func isShell(prog string) bool { return sysinfo.IsShell(prog) }
 
 type paneStateKind int
@@ -64,7 +64,7 @@ type paneState struct {
 	prog string
 }
 
-// Why the agent thinks Claude Code is gone; these words go to the chat.
+// Why the agent thinks the assistant is gone; these words go to the chat.
 const (
 	goneSession = "session gone"
 	goneShell   = "a shell is in the foreground"
@@ -78,7 +78,7 @@ func (p paneState) reason() string {
 }
 
 // readPaneState looks at what runs in the pane. An answer that cannot be told (tmux hangs, fails in another way) is
-// paneUnknown and makes nobody act: a tmux that does not answer is no proof that Claude Code is gone.
+// paneUnknown and makes nobody act: a tmux that does not answer is no proof that the assistant is gone.
 func (a *Agent) readPaneState(ctx context.Context) paneState {
 	ctx, cancel := context.WithTimeout(ctx, paneTimeout)
 	defer cancel()
@@ -116,7 +116,7 @@ func (a *Agent) healSettings() healSettings {
 	h := a.cfg.Ext.Heal
 	s := healSettings{command: strings.TrimSpace(h.Command), workdir: a.cfg.Ext.Workdir, grace: h.Grace, tries: h.MaxTries, window: h.Window}
 	if s.command == "" {
-		s.command = defaultClaudeCommand
+		s.command = defaultAssistantCommand
 	}
 	if s.tries <= 0 {
 		s.tries = defaultHealTries
@@ -130,7 +130,7 @@ func (a *Agent) healSettings() healSettings {
 	return s
 }
 
-// healTick is one look at the pane. It acts only when Claude Code has been gone for the whole grace period, and at a
+// healTick is one look at the pane. It acts only when the assistant has been gone for the whole grace period, and at a
 // shell only when the prompt has stayed idle for all of it.
 func (a *Agent) healTick(ctx context.Context) {
 	p := a.readPaneState(ctx)
@@ -202,7 +202,7 @@ func (a *Agent) healStart(ctx context.Context, s healSettings) {
 		m.mu.Unlock()
 		if first {
 			a.log.Warn("auto-heal gives up", "starts", n, "window", s.window.String())
-			a.queueNotice(ctx, fmt.Sprintf("⚠️ Claude Code is down and could not be kept running (%d starts in %s); use /continue when you want to try again", n, humanSpan(s.window)), nil)
+			a.queueNotice(ctx, fmt.Sprintf("⚠️ %s is down and could not be kept running (%d starts in %s); use /continue when you want to try again", a.assistantName(), n, humanSpan(s.window)), nil)
 		}
 		return
 	}
@@ -224,11 +224,11 @@ func (a *Agent) healStart(ctx context.Context, s healSettings) {
 	case busy:
 		a.log.Debug("auto-heal leaves the shell alone: something is typed at its prompt", "why", p.reason())
 	case err != nil:
-		a.log.Warn("auto-heal could not start Claude Code", "why", p.reason(), "err", err)
+		a.log.Warn("auto-heal could not start the assistant", "why", p.reason(), "err", err)
 	case launched:
-		a.log.Info("auto-heal started Claude Code", "why", p.reason())
+		a.log.Info("auto-heal started the assistant", "why", p.reason())
 		a.stuckForget()
-		a.queueNotice(ctx, fmt.Sprintf("♻️ Claude Code had stopped (%s); started with %s", p.reason(), shownCommand(s.command)), nil)
+		a.queueNotice(ctx, fmt.Sprintf("♻️ %s had stopped (%s); started with %s", a.assistantName(), p.reason(), shownCommand(s.command)), nil)
 	}
 }
 
@@ -236,18 +236,18 @@ func (a *Agent) healStart(ctx context.Context, s healSettings) {
 // now would be glued to it.
 var errShellBusy = errors.New("the shell prompt is in use")
 
-// launch starts Claude Code in a pane that is gone or at a shell. It reports whether it started anything; false with no
-// error means the pane turned out to show Claude Code already. At a shell it types only into an idle prompt; when seen is
+// launch starts the assistant in a pane that is gone or at a shell. It reports whether it started anything; false with no
+// error means the pane turned out to show the assistant already. At a shell it types only into an idle prompt; when seen is
 // set, the last line of the screen must also be the one that auto-heal saw when its grace period began.
 func (a *Agent) launch(ctx context.Context, s healSettings, p paneState, seen *string) (bool, error) {
 	switch {
 	case !filepath.IsAbs(s.workdir) || strings.ContainsAny(s.workdir, "\x00\n\r"):
 		return false, &userError{"the working directory (PB_WORKDIR) must be an absolute path"}
 	case strings.ContainsAny(s.command, "\x00\n\r"):
-		return false, &userError{"the command to start Claude Code (PB_CLAUDE_COMMAND) must be one line"}
+		return false, &userError{"the command to start the assistant (PB_ASSISTANT_COMMAND) must be one line"}
 	}
 	if st, err := os.Stat(s.workdir); err != nil || !st.IsDir() {
-		return false, &userError{"the working directory does not exist, so Claude Code was not started"}
+		return false, &userError{"the working directory does not exist, so " + a.assistantName() + " was not started"}
 	}
 	ctx, cancel := context.WithTimeout(ctx, startTimeout)
 	defer cancel()
@@ -255,10 +255,10 @@ func (a *Agent) launch(ctx context.Context, s healSettings, p paneState, seen *s
 	case paneNoSession:
 		return true, a.cfg.Screen.Start(ctx, s.workdir, s.command)
 	case paneShell:
-		// A wrapper script that runs Claude Code can make the pane look like a shell. Typing a command into Claude Code's
-		// own input box would send it to the assistant, so a screen that looks like Claude Code is left alone.
+		// A wrapper script that runs the assistant can make the pane look like a shell. Typing a command into the
+		// assistant's own input box would send it to the assistant, so a screen that looks like the assistant is left alone.
 		look := a.lookAtShell(ctx)
-		if look.claude {
+		if look.assistant {
 			return false, nil
 		}
 		// The owner may have begun a line since the last look (rm -rf ~/old, no Enter yet); the command would be glued to it.
@@ -272,9 +272,9 @@ func (a *Agent) launch(ctx context.Context, s healSettings, p paneState, seen *s
 
 // shellLook is what the pane of a shell shows.
 type shellLook struct {
-	line   string // the last line that has anything on it
-	idle   bool   // the line is a prompt with nothing typed after it, and the pane is not scrolled back
-	claude bool   // the screen is Claude Code's (a wrapper script runs it)
+	line      string // the last line that has anything on it
+	idle      bool   // the line is a prompt with nothing typed after it, and the pane is not scrolled back
+	assistant bool   // the screen is the assistant's (a wrapper script runs it)
 }
 
 // paneModer is what a screen offers if it can tell that the pane is scrolled back (copy mode); without it the pane is
@@ -296,7 +296,7 @@ func (a *Agent) lookAtShell(ctx context.Context) shellLook {
 	if err != nil {
 		return shellLook{}
 	}
-	l := shellLook{claude: looksLikeClaudeCode(scr)}
+	l := shellLook{assistant: looksLikeAssistantCode(scr)}
 	if ls := nonEmptyLines(scr); len(ls) > 0 {
 		l.line = ls[len(ls)-1]
 	}
@@ -345,11 +345,12 @@ func tailOf(ls []string, n int) []string {
 // topRule is the full-width line above a dialog of Claude Code.
 var topRule = regexp.MustCompile(`^─{20,}$`)
 
-// looksLikeClaudeCode says whether a screen shows Claude Code's interface at its end: the permission mode or the hint under
-// the input box, the hint to interrupt, a dialog with choices. Only the end of the screen counts. When Claude Code has
-// exited inline, its last answer (with a numbered list in it, or a last frame with the mode line) stays above the prompt of
-// the shell, and that prompt is the last line; so a screen whose last line is a shell prompt is a remnant, not Claude Code.
-func looksLikeClaudeCode(scr string) bool {
+// looksLikeAssistantCode says whether a screen shows the assistant's interface at its end: the permission mode or the hint
+// under the input box, the hint to interrupt, a dialog with choices. Only the end of the screen counts. The patterns are
+// those of Claude Code; for another assistant they simply do not match, which is safe: the pane is then taken as it is.
+// When the assistant has exited inline, its last answer stays above the prompt of the shell, and that prompt is the last
+// line; so a screen whose last line is a shell prompt is a remnant, not the assistant.
+func looksLikeAssistantCode(scr string) bool {
 	ls := nonEmptyLines(scr)
 	if len(ls) == 0 || looksLikeShellPrompt(ls[len(ls)-1]) {
 		return false
@@ -371,13 +372,13 @@ func looksLikeClaudeCode(scr string) bool {
 	return false
 }
 
-// continueClaude is /continue: start Claude Code if it is not running, without counting against the tries of auto-heal.
+// continueClaude is /continue: start the assistant if it is not running, without counting against the tries of auto-heal.
 func (a *Agent) continueClaude(ctx context.Context) error {
 	switch {
 	case a.cfg.Screen == nil:
-		return &userError{"refused: this agent cannot see its tmux session, so it cannot start Claude Code"}
+		return &userError{"refused: this agent cannot see its tmux session, so it cannot start the assistant"}
 	case a.cfg.Ext.Workdir == "":
-		return &userError{"refused: no working directory is configured (PB_WORKDIR), so Claude Code cannot be started"}
+		return &userError{"refused: no working directory is configured (PB_WORKDIR), so the assistant cannot be started"}
 	}
 	s := a.healSettings()
 	m := &a.mach
@@ -391,8 +392,8 @@ func (a *Agent) continueClaude(ctx context.Context) error {
 		m.mu.Lock()
 		m.heal.since, m.heal.reason, m.heal.line, m.heal.gaveUp = time.Time{}, "", "", false
 		m.mu.Unlock()
-		body := "Claude Code is already running"
-		if p.kind == paneRunning && !strings.EqualFold(strings.TrimSpace(p.prog), "claude") {
+		body := a.assistantName() + " is already running"
+		if p.kind == paneRunning && !strings.EqualFold(strings.TrimSpace(p.prog), "claude") && !strings.EqualFold(strings.TrimSpace(p.prog), "opencode") {
 			body += " (in the foreground: " + screen.Cut(oneLineOf(p.prog), 30) + ")"
 		}
 		a.queueNotice(ctx, body, nil)
@@ -407,10 +408,10 @@ func (a *Agent) continueClaude(ctx context.Context) error {
 	case errors.As(err, &ue):
 		return ue
 	case errors.Is(err, errShellBusy):
-		return &userError{"refused: the shell prompt of the session is in use (text is typed after it, or the pane is scrolled back), so Claude Code was not started. Clear the line on the laptop, then send /continue again"}
+		return &userError{"refused: the shell prompt of the session is in use (text is typed after it, or the pane is scrolled back), so the assistant was not started. Clear the line on the laptop, then send /continue again"}
 	case err != nil:
-		a.log.Warn("could not start Claude Code on request", "why", p.reason(), "err", err)
-		return &userError{"could not start Claude Code (the agent's log says why)"}
+		a.log.Warn("could not start the assistant on request", "why", p.reason(), "err", err)
+		return &userError{"could not start the assistant (the agent's log says why)"}
 	case !launched:
 		return already()
 	}
@@ -418,9 +419,9 @@ func (a *Agent) continueClaude(ctx context.Context) error {
 	m.heal.since, m.heal.reason, m.heal.line = time.Time{}, "", "" // auto-heal gives it a grace period before it looks again
 	m.heal.lastStart = a.cfg.Now()                                 // and, if the pane still shows the shell, no second command
 	m.mu.Unlock()
-	a.log.Info("started Claude Code on request", "why", p.reason())
+	a.log.Info("started the assistant on request", "why", p.reason())
 	a.stuckForget()
-	a.queueNotice(ctx, fmt.Sprintf("▶️ Claude Code was started (%s) with %s", p.reason(), shownCommand(s.command)), nil)
+	a.queueNotice(ctx, fmt.Sprintf("▶️ %s was started (%s) with %s", a.assistantName(), p.reason(), shownCommand(s.command)), nil)
 	return nil
 }
 

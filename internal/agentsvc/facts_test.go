@@ -30,7 +30,7 @@ func TestTheHeartbeatCarriesTheFactsOfTheStatusCard(t *testing.T) {
 	r.a.cfg.Spool.Add(wire.TypeReply, "waiting")
 	r.a.cfg.Spool.Add(wire.TypeNotice, "waiting too")
 	meta := machHeartbeatMeta(t, r)
-	want := map[string]string{"bat": "83% charging", "up": "3d4h", "disk": "212G free of 460G", "tmux": "ok", "cc": "claude", "mode": "auto", "q": "2",
+	want := map[string]string{"bat": "83% charging", "up": "3d4h", "disk": "212G free of 460G", "tmux": "ok", "proc": "claude", "mode": "auto", "q": "2",
 		"locked": "false", "host": "laptop", "os": "darwin"}
 	for k, v := range want {
 		if meta[k] != v {
@@ -46,16 +46,16 @@ func TestFactsOfAMissingSessionAndOfAShell(t *testing.T) {
 	r := newMachRig(t, Extras{})
 	r.pane.set(func(f *machPane) { f.gone = true })
 	meta := machHeartbeatMeta(t, r)
-	if meta["tmux"] != "missing" || meta["cc"] != "" || meta["mode"] != "" {
+	if meta["tmux"] != "missing" || meta["proc"] != "" || meta["mode"] != "" {
 		t.Fatalf("%v", meta)
 	}
-	if _, ok := meta["cc"]; ok {
+	if _, ok := meta["proc"]; ok {
 		t.Fatal("an unknown program is left out")
 	}
 	r = newMachRig(t, Extras{})
 	r.pane.shell("zsh")
 	meta = machHeartbeatMeta(t, r)
-	if meta["tmux"] != "ok" || meta["cc"] != "zsh" {
+	if meta["tmux"] != "ok" || meta["proc"] != "zsh" {
 		t.Fatalf("%v", meta)
 	}
 	if _, ok := meta["mode"]; ok {
@@ -68,7 +68,7 @@ func TestClaudeCodeUnderAShellNameIsRecognisedByItsMode(t *testing.T) {
 	r := newMachRig(t, Extras{})
 	r.pane.set(func(f *machPane) { f.prog = "bash" })
 	meta := machHeartbeatMeta(t, r)
-	if meta["cc"] != "bash" || meta["mode"] != "auto" {
+	if meta["proc"] != "bash" || meta["mode"] != "auto" {
 		t.Fatalf("%v", meta)
 	}
 }

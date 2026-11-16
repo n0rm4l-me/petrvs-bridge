@@ -52,8 +52,8 @@ func TestOnlyTheEndOfTheScreenMakesItClaudeCode(t *testing.T) {
 		"frame then a fish prompt":                     {remnantFrameWith("user@host ~/project> "), false},
 		"frame then a themed prompt":                   {remnantFrameWith("~/project on  main ❯ "), false},
 	} {
-		if got := looksLikeClaudeCode(c.scr); got != c.want {
-			t.Errorf("%s: looksLikeClaudeCode = %v, want %v", name, got, c.want)
+		if got := looksLikeAssistantCode(c.scr); got != c.want {
+			t.Errorf("%s: looksLikeAssistantCode = %v, want %v", name, got, c.want)
 		}
 	}
 }

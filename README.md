@@ -359,7 +359,8 @@ unknown flag prints them too, and exits with 2).
 | `PB_INBOX_DIR` | `-inbox-dir` | `.petrvs-inbox` in the workdir, else `inbox` in the state directory | Where files from the chat are saved. A new inbox directory gets a `.gitignore` containing `*`, so the assistant's `git add -A` does not commit chat files; one that already exists is left as it is, add the ignore line yourself |
 | `PB_MAX_FILE_BYTES` | `-max-file-bytes` | `20971520` (20 MiB) | Largest file in either direction, at most 50 MiB |
 | `PB_HEAL` | `-heal` | `false` | Start Claude Code again when it has stopped or its tmux session is gone (needs `PB_WORKDIR`) |
-| `PB_CLAUDE_COMMAND` | `-claude-command` | `claude --continue` | What auto-heal and `/continue` run to start Claude Code, one line |
+| `PB_ASSISTANT_COMMAND` | `-assistant-command` | `claude --continue` | What auto-heal and `/continue` run to start the assistant, one line: `claude --continue`, `opencode`, or a wrapper script. `PB_CLAUDE_COMMAND` and `-claude-command` are the older names of the same setting; a flag beats the environment, and the new name beats the old one |
+| `PB_ASSISTANT_NAME` | `-assistant-name` | `Claude Code` | What the chat calls the assistant in what the agent tells it ("opencode had stopped") |
 | `PB_HEAL_GRACE` | `-heal-grace` | `20s` | Claude Code must have been gone this long before auto-heal acts |
 | `PB_HEAL_TRIES`, `PB_HEAL_WINDOW` | `-heal-tries`, `-heal-window` | `3`, `10m` | Starts allowed within the window before auto-heal gives up |
 | `PB_STUCK_AFTER` | `-stuck-after` | `10m` | Tell the chat when a request has had no reply for this long; `0` or `off` turns it off |
@@ -469,7 +470,7 @@ rules that Claude Code draws across the window shortened to fit a phone. What th
 [examples/tmux-attach-alert.sh](examples/tmux-attach-alert.sh) tells the chat at once when someone attaches to the tmux session
 that Claude Code runs in (tmux's `client-attached` and `client-session-changed` hooks on that one session): who, from where, in
 which mode. `install` and `uninstall` put the hooks on and take them off; `guard COMMAND...` installs them and then becomes the
-command, so putting it in front of `PB_CLAUDE_COMMAND` brings the hooks back after every restart of the session. With
+command, so putting it in front of `PB_ASSISTANT_COMMAND` (or `PB_CLAUDE_COMMAND`) brings the hooks back after every restart of the session. With
 `PB_ATTACH_KICK=1` it also disconnects the client (off by default, since it disconnects you too; attaching is allowed for a
 while by writing an end time to `$PB_STATE_DIR/attach-allow-until`). This is an alarm, not a lock: tmux has no access control
 beyond the permissions of its socket, so a process of the same user can still attach, type and read the screen, can take the
@@ -502,7 +503,7 @@ matter: the service must see the same tmux socket as your session, so no `Privat
 directory of your tmux, as its default does not have Homebrew's. Without them the agent still connects and sends
 heartbeats while every tmux call fails. On Linux the unit sets `KillMode=process`: tmux started by auto-heal or `/continue`
 lives in the unit's cgroup and would otherwise be killed with the agent on a restart, a stop or a crash. In both examples
-the `PATH` must reach `claude` and `node` (or `PB_CLAUDE_COMMAND` must be an absolute path), because after a reboot the tmux
+the `PATH` must reach `claude` and `node` (or `PB_ASSISTANT_COMMAND` must be an absolute path), because after a reboot the tmux
 server that auto-heal starts inherits the agent's environment.
 
 ## Development

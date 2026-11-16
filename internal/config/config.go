@@ -101,19 +101,21 @@ type Agent struct {
 	ReorderWindow  time.Duration
 	AlarmCodeState string // where used one-time codes are remembered across restarts
 
-	// Workdir is the directory Claude Code runs in; empty when not set.
+	// AssistantName is what the chat calls the assistant in status messages (default "Claude Code").
+	AssistantName string
+	// Workdir is the directory the assistant runs in; empty when not set.
 	Workdir string
 	// InboxDir is where files from the chat are saved.
 	InboxDir string
 	// MaxFileBytes bounds a file in either direction; 0 was replaced by the default (20 MiB).
 	MaxFileBytes int64
-	// Heal turns on starting Claude Code again when it has stopped (needs Workdir); ClaudeCommand is what is run,
+	// Heal turns on starting the assistant again when it has stopped (needs Workdir); AssistantCommand is what is run,
 	// HealGrace how long the pane must be without it first, HealTries the starts allowed within HealWindow.
-	Heal          bool
-	ClaudeCommand string
-	HealGrace     time.Duration
-	HealTries     int
-	HealWindow    time.Duration
+	Heal             bool
+	AssistantCommand string
+	HealGrace        time.Duration
+	HealTries        int
+	HealWindow       time.Duration
 	// StuckAfter is how long a request may go without a reply before the chat is told; 0 turns the check off.
 	StuckAfter time.Duration
 }
@@ -500,18 +502,23 @@ func ParseAgent(args []string, getenv func(string) string) (*Agent, error) {
 	fs.DurationVar(&a.Silence, "silence-limit", e.dur("PB_SILENCE_LIMIT", 0), "no answer from the hub for this long means a new handshake; 0 means 3 x heartbeat (env PB_SILENCE_LIMIT)")
 	fs.DurationVar(&a.ReorderWindow, "reorder-window", e.dur("PB_REORDER_WINDOW", 2*time.Second), "how long a command waits for an earlier one that has not arrived before that one is reported lost (env PB_REORDER_WINDOW)")
 	fs.DurationVar(&a.ReceiptTimeout, "receipt-timeout", e.dur("PB_RECEIPT_TIMEOUT", 30*time.Second), "a spooled message is sent again if not confirmed in this time (env PB_RECEIPT_TIMEOUT)")
-	fs.StringVar(&a.Workdir, "workdir", e.str("PB_WORKDIR", ""), "directory Claude Code runs in; auto-heal starts it there (env PB_WORKDIR)")
+	fs.StringVar(&a.AssistantName, "assistant-name", e.str("PB_ASSISTANT_NAME", "Claude Code"), "what the chat calls the assistant in status messages (env PB_ASSISTANT_NAME)")
+	fs.StringVar(&a.Workdir, "workdir", e.str("PB_WORKDIR", ""), "directory the assistant runs in; auto-heal starts it there (env PB_WORKDIR)")
 	fs.StringVar(&a.InboxDir, "inbox-dir", e.str("PB_INBOX_DIR", ""), "where files from the chat are saved; default: .petrvs-inbox in the workdir, or inbox in the state directory (env PB_INBOX_DIR)")
 	fs.Int64Var(&a.MaxFileBytes, "max-file-bytes", e.int64("PB_MAX_FILE_BYTES"), "largest file in either direction; 0 means 20 MiB, at most 50 MiB (env PB_MAX_FILE_BYTES)")
-	fs.BoolVar(&a.Heal, "heal", e.boolean("PB_HEAL", false), "start Claude Code again when it has stopped or its tmux session is gone; needs the workdir (env PB_HEAL)")
-	fs.StringVar(&a.ClaudeCommand, "claude-command", e.str("PB_CLAUDE_COMMAND", "claude --continue"), "what auto-heal and /continue run to start Claude Code (env PB_CLAUDE_COMMAND)")
-	fs.DurationVar(&a.HealGrace, "heal-grace", e.dur("PB_HEAL_GRACE", 20*time.Second), "Claude Code must be gone this long before auto-heal acts (env PB_HEAL_GRACE)")
+	fs.BoolVar(&a.Heal, "heal", e.boolean("PB_HEAL", false), "start the assistant again when it has stopped or its tmux session is gone; needs the workdir (env PB_HEAL)")
+	// Two names for one setting: the old one stays as an alias. They are read apart and chosen below, since two flags that write to the same
+	// variable would each reset it to their own default, and the one registered last would win over the environment of the first.
+	assistantCmd := fs.String("assistant-command", e.str("PB_ASSISTANT_COMMAND", ""), "what auto-heal and /continue run to start the assistant, for example \"opencode\" or \"claude --continue\" (env PB_ASSISTANT_COMMAND; PB_CLAUDE_COMMAND and -claude-command are older names of it)")
+	claudeCmd := fs.String("claude-command", e.str("PB_CLAUDE_COMMAND", ""), "deprecated alias of -assistant-command")
+	fs.DurationVar(&a.HealGrace, "heal-grace", e.dur("PB_HEAL_GRACE", 20*time.Second), "the assistant must be gone this long before auto-heal acts (env PB_HEAL_GRACE)")
 	healTries := fs.Int("heal-tries", int(e.int64("PB_HEAL_TRIES")), "starts allowed within the heal window before auto-heal gives up; 0 means 3 (env PB_HEAL_TRIES)")
 	fs.DurationVar(&a.HealWindow, "heal-window", e.dur("PB_HEAL_WINDOW", 10*time.Minute), "the window the heal tries are counted in (env PB_HEAL_WINDOW)")
 	stuck := fs.String("stuck-after", e.str("PB_STUCK_AFTER", "10m"), "tell the chat when a request has had no reply for this long; 0 or off turns it off (env PB_STUCK_AFTER)")
 	if err := parseFlags(fs, args); err != nil {
 		return nil, err
 	}
+	a.AssistantCommand = chooseAssistantCommand(fs, *assistantCmd, *claudeCmd)
 	a.validate(e, !emulator(e))
 	if !identity.ValidName(a.Name) {
 		e.err = append(e.err, "name: set PB_NAME or -name (lower-case letters, digits, - and _)")
@@ -542,10 +549,10 @@ func ParseAgent(args []string, getenv func(string) string) (*Agent, error) {
 		}
 	}
 	if a.Heal && a.Workdir == "" {
-		e.err = append(e.err, "heal: PB_HEAL needs PB_WORKDIR, the directory to start Claude Code in")
+		e.err = append(e.err, "heal: PB_HEAL needs PB_WORKDIR, the directory to start the assistant in")
 	}
-	if strings.TrimSpace(a.ClaudeCommand) == "" || strings.ContainsAny(a.ClaudeCommand, "\x00\n\r") {
-		e.err = append(e.err, "claude-command: one line, not empty")
+	if strings.TrimSpace(a.AssistantCommand) == "" || strings.ContainsAny(a.AssistantCommand, "\x00\n\r") {
+		e.err = append(e.err, "assistant-command: one line, not empty")
 	}
 	a.SpoolDir = filepath.Join(a.StateDir, "spool")
 	a.LockFile = filepath.Join(a.StateDir, "locked")
@@ -562,4 +569,22 @@ func ParseAgent(args []string, getenv func(string) string) (*Agent, error) {
 		}
 	}
 	return a, finish(e)
+}
+
+// chooseAssistantCommand picks the command that starts the assistant. A flag given on the command line beats the environment, the
+// new name beats the old one at each level, and with nothing given the command is "claude --continue".
+func chooseAssistantCommand(fs *flag.FlagSet, fromAssistant, fromClaude string) string {
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	switch {
+	case given["assistant-command"]:
+		return fromAssistant
+	case given["claude-command"]:
+		return fromClaude
+	case fromAssistant != "": // the environment
+		return fromAssistant
+	case fromClaude != "":
+		return fromClaude
+	}
+	return "claude --continue"
 }

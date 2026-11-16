@@ -42,9 +42,9 @@ func (a *Agent) addFacts(ctx context.Context, meta map[string]string) {
 		case paneNoSession:
 			put("tmux", "missing")
 		case paneRunning, paneShell:
-			// Claude Code may run under a wrapper that makes the pane look like a shell: the mode tells.
+			// The assistant may run under a wrapper that makes the pane look like a shell: the mode tells.
 			put("tmux", "ok")
-			put("cc", p.prog)
+			put("proc", p.prog)
 			put("mode", a.paneMode(ctx, p.kind))
 		}
 	}

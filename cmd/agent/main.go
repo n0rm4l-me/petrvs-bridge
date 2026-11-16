@@ -249,8 +249,9 @@ func serve(args []string, getenv func(string) string) int {
 		Info:          func() map[string]string { return map[string]string{"host": host, "os": runtime.GOOS} },
 		Screen:        ex,
 		Ext: agentsvc.Extras{
-			Workdir: cfg.Workdir, InboxDir: cfg.InboxDir, StateDir: cfg.StateDir, MaxFileBytes: cfg.MaxFileBytes, StuckAfter: cfg.StuckAfter,
-			Heal:  agentsvc.Heal{Enabled: cfg.Heal, Command: cfg.ClaudeCommand, Grace: cfg.HealGrace, MaxTries: cfg.HealTries, Window: cfg.HealWindow},
+			AssistantName: cfg.AssistantName,
+			Workdir:       cfg.Workdir, InboxDir: cfg.InboxDir, StateDir: cfg.StateDir, MaxFileBytes: cfg.MaxFileBytes, StuckAfter: cfg.StuckAfter,
+			Heal:  agentsvc.Heal{Enabled: cfg.Heal, Command: cfg.AssistantCommand, Grace: cfg.HealGrace, MaxTries: cfg.HealTries, Window: cfg.HealWindow},
 			Facts: sysinfo.FactsFunc(diskPath),
 		},
 	}

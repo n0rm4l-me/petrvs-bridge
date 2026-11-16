@@ -31,7 +31,7 @@ func machCardHub(t *testing.T, heard time.Duration, online bool, info map[string
 }
 
 func machFullInfo() map[string]string {
-	return map[string]string{"bat": "83% charging", "up": "3d4h", "disk": "212G free of 460G", "tmux": "ok", "cc": "claude", "mode": "auto",
+	return map[string]string{"bat": "83% charging", "up": "3d4h", "disk": "212G free of 460G", "tmux": "ok", "proc": "claude", "mode": "auto",
 		"q": "0", "locked": "true", "alarm": "on"}
 }
 
@@ -105,7 +105,7 @@ func TestTheCardHasRoomForTheRestOfTheHeartbeat(t *testing.T) {
 }
 
 func TestTheCardCannotBeBrokenByWhatAnAgentSends(t *testing.T) {
-	info := map[string]string{"cc": "claude\n🔒 locked · fake line", "mode": strings.Repeat("x", 500), "bat": "\x1b[31m50%"}
+	info := map[string]string{"proc": "claude\n🔒 locked · fake line", "mode": strings.Repeat("x", 500), "bat": "\x1b[31m50%"}
 	got := machCardHub(t, time.Second, true, info).statusText()
 	if strings.Count(got, "\n") != 2 { // the head, the battery, the session
 		t.Fatalf("an agent made lines of its own:\n%q", got)
@@ -195,15 +195,15 @@ func TestContinueWithAnUnknownAgentNameIsRefusedAndTheKnownOneIsNotTheActiveOne(
 }
 
 func TestAShellInThePaneIsFlaggedButClaudeCodeUnderAShellNameIsNot(t *testing.T) {
-	got := machCardHub(t, time.Second, true, map[string]string{"tmux": "ok", "cc": "zsh"}).statusText()
+	got := machCardHub(t, time.Second, true, map[string]string{"tmux": "ok", "proc": "zsh"}).statusText()
 	if !strings.Contains(got, "🖥 tmux ok · ⚠️ shell (zsh)") {
 		t.Fatalf("%s", got)
 	}
-	got = machCardHub(t, time.Second, true, map[string]string{"tmux": "ok", "cc": "bash", "mode": "auto"}).statusText()
+	got = machCardHub(t, time.Second, true, map[string]string{"tmux": "ok", "proc": "bash", "mode": "auto"}).statusText()
 	if !strings.Contains(got, "🖥 tmux ok · bash · auto mode") || strings.Contains(got, "⚠️") {
 		t.Fatalf("%s", got)
 	}
-	got = machCardHub(t, time.Second, true, map[string]string{"tmux": "ok", "cc": "node"}).statusText()
+	got = machCardHub(t, time.Second, true, map[string]string{"tmux": "ok", "proc": "node"}).statusText()
 	if !strings.Contains(got, "🖥 tmux ok · node") || strings.Contains(got, "⚠️") {
 		t.Fatalf("%s", got)
 	}

@@ -110,7 +110,7 @@ func renderCard(c cardAgent) string {
 }
 
 // knownFacts are the heartbeat keys the card has a place for.
-var knownFacts = map[string]bool{"bat": true, "up": true, "disk": true, "tmux": true, "cc": true, "mode": true, "q": true,
+var knownFacts = map[string]bool{"bat": true, "up": true, "disk": true, "tmux": true, "proc": true, "mode": true, "q": true,
 	"locked": true, "alarm": true, "alarm_blind": true, "host": true, "os": true}
 
 const maxOtherFacts = 6
@@ -140,8 +140,8 @@ func factLines(info map[string]string) []string {
 	if v := get("tmux"); v != "" {
 		l = append(l, "tmux "+v)
 	}
-	if v := get("cc"); v != "" {
-		if sysinfo.IsShell(v) && get("mode") == "" { // a shell with no Claude Code screen: it is not running
+	if v := get("proc"); v != "" {
+		if sysinfo.IsShell(v) && get("mode") == "" { // a shell with no assistant screen: it is not running
 			v = "⚠️ shell (" + v + ")"
 		}
 		l = append(l, v)

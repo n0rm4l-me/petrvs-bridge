@@ -143,7 +143,7 @@
     never followed to another host or logged. Commands typed after a file wait behind it (at most 32 per agent) and are
     discarded by `/lockdown`, so nothing typed before a lockdown is sent after it.
 18. What the bridge starts or types on the machine on its own (auto-heal, `/continue`) comes only from the agent's local
-    settings (`PB_CLAUDE_COMMAND`, `PB_WORKDIR`); nothing from the chat reaches a shell. Both are refused on a locked
+    settings (`PB_ASSISTANT_COMMAND`, `PB_WORKDIR`); nothing from the chat reaches a shell. Both are refused on a locked
     machine, `/continue` expires like a key, and the agent never types into a pane that looks like Claude Code's own screen.
 19. Text from the chat is not typed into a shell or into a dialog. If the foreground program of the active pane is a shell
     and the screen is not Claude Code's, the text is refused instead of being run as a command. A screen counts as Claude

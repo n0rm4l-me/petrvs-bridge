@@ -12,32 +12,34 @@ import (
 // below in a file of its own; the rest of the agent only calls these.
 
 // Screen reads and starts the session that the agent types into. It is optional: without it the agent cannot look at
-// the prompt a key answers, send the screen, tell the permission mode, notice that Claude Code has stopped or start it.
+// the prompt a key answers, send the screen, tell the permission mode, notice that the assistant has stopped or start it.
 type Screen interface {
 	// Capture returns the text on the screen of the session's pane. It returns screen.ErrNoSession if there is none.
 	Capture(ctx context.Context) (string, error)
-	// PaneCommand returns the program in the foreground of the pane ("claude", "zsh", ...), or screen.ErrNoSession.
+	// PaneCommand returns the program in the foreground of the pane ("claude", "opencode", "zsh", ...), or screen.ErrNoSession.
 	PaneCommand(ctx context.Context) (string, error)
 	// Start creates the session running command in workdir. The command comes from the local settings.
 	Start(ctx context.Context, workdir, command string) error
 }
 
-// Heal says whether and how the agent starts Claude Code again when it has stopped.
+// Heal says whether and how the agent starts the assistant again when it has stopped.
 type Heal struct {
 	Enabled bool
-	// Command is run in the session, in Workdir, to start Claude Code, for example "claude --continue".
+	// Command is run in the session, in Workdir, to start the assistant, for example "claude --continue" or "opencode".
 	Command string
 	// Grace is how long the pane must show a shell (or the session be missing) before the agent acts, so that a restart
 	// by hand is not raced.
 	Grace time.Duration
-	// MaxTries starts are allowed within Window; after that the agent gives up and says so until Claude Code runs again.
+	// MaxTries starts are allowed within Window; after that the agent gives up and says so until the assistant runs again.
 	MaxTries int
 	Window   time.Duration
 }
 
 // Extras holds the settings of the parts beyond text and keys. The zero value turns them off or uses defaults.
 type Extras struct {
-	// Workdir is the directory Claude Code runs in; auto-heal starts it there.
+	// AssistantName is what the chat calls the assistant in status messages (default "Claude Code").
+	AssistantName string
+	// Workdir is the directory the assistant runs in; auto-heal starts it there.
 	Workdir string
 	// InboxDir is where files from the chat are saved. Empty turns receiving files off.
 	InboxDir string

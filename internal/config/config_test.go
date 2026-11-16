@@ -426,7 +426,7 @@ func TestFileAndWatchSettingsHaveSafeDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.MaxFileBytes != DefaultMaxFileBytes || a.Heal || a.ClaudeCommand != "claude --continue" || a.HealGrace != 20*time.Second ||
+	if a.MaxFileBytes != DefaultMaxFileBytes || a.Heal || a.AssistantCommand != "claude --continue" || a.HealGrace != 20*time.Second ||
 		a.HealTries != 3 || a.HealWindow != 10*time.Minute || a.StuckAfter != 10*time.Minute || a.Workdir != "" {
 		t.Fatalf("%+v", a)
 	}
@@ -455,7 +455,7 @@ func TestTheInboxFollowsTheWorkdirAndEverythingCanBeSet(t *testing.T) {
 	e["PB_HEAL_WINDOW"] = "1m"
 	e["PB_STUCK_AFTER"] = "off"
 	a, err = ParseAgent(nil, envOf(e))
-	if err != nil || a.InboxDir != "/data/in" || a.MaxFileBytes != 1<<20 || !a.Heal || a.ClaudeCommand != "claude --permission-mode auto --continue" ||
+	if err != nil || a.InboxDir != "/data/in" || a.MaxFileBytes != 1<<20 || !a.Heal || a.AssistantCommand != "claude --permission-mode auto --continue" ||
 		a.HealGrace != 5*time.Second || a.HealTries != 2 || a.HealWindow != time.Minute || a.StuckAfter != 0 {
 		t.Fatalf("%v %+v", err, a)
 	}
@@ -753,5 +753,54 @@ func TestAnInvalidReactionIsReportedOnceForSlackToo(t *testing.T) {
 		} else if err.Error() != first {
 			t.Fatalf("the report changes from run to run:\n%s\n%s", first, err)
 		}
+	}
+}
+
+func TestTheCommandThatStartsTheAssistantHasOneSettingAndAnOldName(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		args []string
+		want string
+	}{
+		{"nothing given", nil, nil, "claude --continue"},
+		{"the new variable", map[string]string{"PB_ASSISTANT_COMMAND": "opencode"}, nil, "opencode"},
+		{"the old variable", map[string]string{"PB_CLAUDE_COMMAND": "claude -c"}, nil, "claude -c"},
+		{"both variables: the new one", map[string]string{"PB_ASSISTANT_COMMAND": "opencode", "PB_CLAUDE_COMMAND": "claude -c"}, nil, "opencode"},
+		{"the new flag", nil, []string{"-assistant-command", "opencode run"}, "opencode run"},
+		{"the old flag", nil, []string{"-claude-command", "claude x"}, "claude x"},
+		{"a flag beats the environment", map[string]string{"PB_ASSISTANT_COMMAND": "opencode"}, []string{"-claude-command", "claude x"}, "claude x"},
+		{"the new flag beats the old one", nil, []string{"-claude-command", "claude x", "-assistant-command", "opencode"}, "opencode"},
+		{"a flag beats both variables", map[string]string{"PB_ASSISTANT_COMMAND": "a", "PB_CLAUDE_COMMAND": "b"}, []string{"-assistant-command", "opencode"}, "opencode"},
+		{"a command with a path and options", map[string]string{"PB_ASSISTANT_COMMAND": "/opt/homebrew/bin/opencode --port 4096"}, nil, "/opt/homebrew/bin/opencode --port 4096"},
+	}
+	for _, c := range cases {
+		e := agentEnv(t)
+		for k, v := range c.env {
+			e[k] = v
+		}
+		a, err := ParseAgent(c.args, envOf(e))
+		if err != nil || a.AssistantCommand != c.want {
+			t.Errorf("%s: %q (%v), want %q", c.name, a.AssistantCommand, err, c.want)
+		}
+	}
+	// a command must be one line, whichever name it comes by
+	for _, env := range []map[string]string{{"PB_ASSISTANT_COMMAND": "opencode\nrm -rf /"}, {"PB_CLAUDE_COMMAND": "claude\r\nx"}} {
+		e := agentEnv(t)
+		for k, v := range env {
+			e[k] = v
+		}
+		if _, err := ParseAgent(nil, envOf(e)); err == nil || !strings.Contains(err.Error(), "assistant-command") {
+			t.Errorf("%v: %v", env, err)
+		}
+	}
+	// the name of the assistant, as the chat says it
+	e := agentEnv(t)
+	if a, _ := ParseAgent(nil, envOf(e)); a.AssistantName != "Claude Code" {
+		t.Errorf("default name %q", a.AssistantName)
+	}
+	e["PB_ASSISTANT_NAME"] = "opencode"
+	if a, _ := ParseAgent(nil, envOf(e)); a.AssistantName != "opencode" {
+		t.Errorf("name %q", a.AssistantName)
 	}
 }
