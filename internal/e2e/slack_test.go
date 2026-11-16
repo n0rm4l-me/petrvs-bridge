@@ -113,6 +113,9 @@ func TestARepliedToMessageOfAnAgentGoesToThatAgentInSlack(t *testing.T) {
 	nas, laptop := r.Agents["nas"], r.Agents["laptop"]
 	nas.Spool.Add(wire.TypeReply, "nas asks: overwrite the file?")
 	waitPosted(t, r, srv, "nas asks")
+	// The fake Slack has the message as soon as it is posted, but the hub learns whose it is only when its own call has returned.
+	// It tells the agent (which then empties its queue) after that, so wait for it before answering the message.
+	r.Eventually("the hub to confirm the message", func() bool { return nas.Spool.Len() == 0 })
 	var ts string
 	for _, p := range srv.Posted() {
 		if strings.Contains(p.Text, "nas asks") {
