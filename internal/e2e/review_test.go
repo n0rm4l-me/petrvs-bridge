@@ -30,6 +30,21 @@ func lastMsgs(r *testrig.Rig, n int) []transportPublished {
 	return all[len(all)-n:]
 }
 
+// settled waits until the hub has answered the agent's first message ("ready"): that answer is the first sealed message on the
+// agent's topic. A test that holds the agent's subscription back to see what it is sent next must start after it, or the answer to the
+// start-up traffic lands among the held messages when the machine is slow.
+func settled(t *testing.T, r *testrig.Rig) {
+	t.Helper()
+	r.Eventually("the hub to answer the agent's first message", func() bool {
+		for _, p := range r.Mem.Published(r.Names.ToAgent("laptop")) {
+			if p.Attrs[wire.AttrKind] == wire.KindMsg {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func TestCommandsRunInTheOrderTheyWereTyped(t *testing.T) {
 	for name, order := range map[string]func(n int) []int{
 		"reversed": func(n int) []int {
@@ -49,6 +64,7 @@ func TestCommandsRunInTheOrderTheyWereTyped(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, a := one(t, quiet())
+			settled(t, r)
 			r.Mem.Hold(r.Names.AgentSub("laptop"))
 			var want []string
 			for i := 1; i <= 6; i++ {
@@ -69,6 +85,7 @@ func TestCommandsRunInTheOrderTheyWereTyped(t *testing.T) {
 
 func TestKeysAndTextShareOneOrder(t *testing.T) {
 	r, a := one(t, quiet())
+	settled(t, r)
 	r.Mem.Hold(r.Names.AgentSub("laptop"))
 	r.Say("first")
 	r.Eventually("1", func() bool { return r.Hub.Stats().Relayed == 1 })
@@ -105,6 +122,7 @@ func TestALostCommandIsReportedAndTheNextOnesStillRun(t *testing.T) {
 
 func TestACommandThatArrivesAfterItsTurnIsNotRun(t *testing.T) {
 	r, a := one(t, quiet())
+	settled(t, r)
 	r.Mem.Hold(r.Names.AgentSub("laptop"))
 	r.Say("early")
 	r.Eventually("1", func() bool { return r.Hub.Stats().Relayed == 1 })

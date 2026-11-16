@@ -284,6 +284,11 @@ func TestAHelloWhoseAckCouldNotBePublishedIsAnsweredWhenTheBusDeliversItAgain(t 
 		s := r.hub.Stats()
 		t.Fatalf("the redelivered hello was never answered (hellos %d, refused %d)", s.Hellos, s.HellosRefused)
 	}
+	// The hub counts the hello after the publish of the ack has returned, and the test sees the ack inside that publish: wait for
+	// the count instead of reading it once.
+	for end := time.Now().Add(3 * time.Second); r.hub.Stats().Hellos == 0 && time.Now().Before(end); {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if s := r.hub.Stats(); s.Hellos != 1 || s.HellosRefused != 0 {
 		t.Fatalf("%+v", s)
 	}

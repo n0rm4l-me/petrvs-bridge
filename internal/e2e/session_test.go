@@ -18,8 +18,11 @@ import (
 // The commands that waited in the agent's queue for an earlier one belong to a session; when the session is replaced their
 // numbers mean nothing and they are gone. The user is told, once for each, instead of waiting for them for ever.
 func TestCommandsWaitingWhenTheSessionIsReplacedAreReportedAsDropped(t *testing.T) {
-	r, a := one(t, testrig.Options{Heartbeat: time.Hour, OfflineAfter: time.Hour, ReorderWindow: time.Minute})
+	r, a := one(t, testrig.Options{Heartbeat: time.Hour, OfflineAfter: time.Hour, ReorderWindow: time.Minute, SilenceLimit: 2 * time.Second})
+	// The agent starts a new session after SilenceLimit without a word from the hub, which is what this test waits for after the
+	// release. The limit must be longer than the time the messages are held, or a hello of that new session lands among them.
 	sub := r.Names.AgentSub("laptop")
+	settled(t, r)
 	r.Mem.Hold(sub)
 	for _, s := range []string{"a", "b", "c"} {
 		r.Say(s)
