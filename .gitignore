@@ -26,3 +26,13 @@ credentials*.json
 *.tfplan
 *.tfvars
 crash.log
+
+# Local state of a running agent and of the tools around it: nothing of it belongs in a commit.
+/agents/
+/state/
+.petrvs-inbox/
+*.log
+.claude/
+.DS_Store
+.idea/
+.vscode/

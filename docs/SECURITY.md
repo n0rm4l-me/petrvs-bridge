@@ -180,4 +180,6 @@
 
 ## Reporting a problem
 
-Please report security problems privately to the maintainer before publishing them.
+Please report security problems privately, with GitHub's private vulnerability reporting of this repository (the Security tab,
+"Report a vulnerability"), before publishing them. Say which version or commit you tested, what you did and what happened.
+There is no bounty; a reported problem is answered in the open once it is fixed, with credit if you want it.
