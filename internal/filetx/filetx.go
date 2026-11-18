@@ -97,6 +97,16 @@ func Kind(name string, size int64) string {
 	return "document"
 }
 
+// IsVoice says whether a file name has the extension of a format that Telegram plays as a voice message (sendVoice): an
+// OGG file with Opus, MP3 or M4A. Other formats sent that way would only arrive as audio files or documents.
+func IsVoice(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".ogg", ".oga", ".opus", ".mp3", ".m4a":
+		return true
+	}
+	return false
+}
+
 // SafeName makes a name fit to create a file with: the last path element only, letters, digits and . _ - + ( ) space,
 // no leading dot or space, at most 100 bytes with the extension kept. It never returns an empty name.
 func SafeName(name string) string {

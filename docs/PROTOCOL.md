@@ -115,7 +115,8 @@ Parsed strictly (unknown fields rejected). Allowed types depend on the direction
 A file travels as `part` payloads followed by one `file` payload. A `part` carries at most 128 KiB in `body` (base64)
 with `meta.t` (the transfer id, 1 to 32 characters) and `meta.i` (the index from 0). The `file` payload ends the transfer:
 `body` is the caption (at most 1000 bytes); `meta` has `t`, `parts`, `name`, `size` (bytes), `sha` (SHA-256 of the whole,
-hex) and `kind` (`photo` or `document`). Nothing is trusted before the whole has been put together and its size and hash
+hex) and `kind` (`photo`, `voice` or `document`; the hub decides from the name and size itself what to show, so the agent only
+asks, and a hub that does not know `voice` takes it for a document). Nothing is trusted before the whole has been put together and its size and hash
 match; the receiver holds at most 16 unfinished transfers, twice the size limit in total and forgets an idle one after ten
 minutes. The ratchet skips at most 50 message keys when the bus reorders and gives a receiver a budget of new peer keys
 (`ratchet.DHStepBurst` = 20, refilled at `DHStepPerSecond` = 5), so both directions pace their parts: a sender keeps at most

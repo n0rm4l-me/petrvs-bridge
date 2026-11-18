@@ -213,8 +213,11 @@ A notice that says "(some values are hidden)" has had secrets hidden. A command 
 characters) loses its middle and gets only an Esc button and the line "The command is too long to show here": read it on
 the laptop or with `/screen`, then answer with `/key N`.
 
-**Files from the machine.** `agent send-file [-caption TEXT] PATH` (what Claude runs when you ask it to send you something)
-queues a file for the hub to upload to the chat: a photo for png, jpg and webp up to 10 MiB, otherwise a document. The Stop
+**Files from the machine.** `agent send-file [-caption TEXT] [-voice] PATH` (what Claude runs when you ask it to send you something)
+queues a file for the hub to upload to the chat: a photo for png, jpg and webp up to 10 MiB, otherwise a document. With
+`-voice` an audio file (ogg with Opus, mp3 or m4a; anything else is refused) is sent as a voice message that the chat plays
+with its own player. The hub decides that from the name itself, and when Telegram refuses the voice message (a format it
+cannot play, or the user has forbidden voice messages from bots) the same bytes go as a document; Slack shows it as a file. The Stop
 hook also sends the pictures Claude read during the turn. The agent refuses secrets before anything leaves the machine:
 by name (`.env`, `id_rsa`, `*credential*`; names are compared without regard to case and Unicode variants, so `.AWS` and
 `.awſ` are `.aws`), by place (`~/.ssh`, `~/.aws`, the agent's own state), by content (private keys, tokens) and by identity
@@ -484,9 +487,9 @@ the agent should be on `unary`: `session established` in its log every two minut
 
 Other agent commands: `agent send [-type reply|notice|alert] [TEXT | -]` queues a message for the hub (reads standard
 input for `-`); it only needs `PB_STATE_DIR` (and exits 1 when the body is too large once escaped for storage).
-`agent send-file [-caption TEXT] PATH` queues a file for the hub to upload to the chat; it needs only `PB_STATE_DIR` and
+`agent send-file [-caption TEXT] [-voice] PATH` queues a file for the hub to upload to the chat; it needs only `PB_STATE_DIR` and
 reads `PB_MAX_FILE_BYTES`. It exits 0 when queued, 1 when refused (not a regular file, empty or too large, a secret, a file
-in the inbox, more than 10 files a minute, the queue is full) and 2 on a usage error. `agent prompt` is what the Notification hook runs: it
+in the inbox, `-voice` for a file that is not ogg, mp3 or m4a, more than 10 files a minute, the queue is full) and 2 on a usage error. `agent prompt` is what the Notification hook runs: it
 reads the hook's JSON on standard input and queues a notice with the prompt from the screen and its buttons; it needs
 `PB_STATE_DIR` and tmux on the `PATH`. `agent unlock`
 lifts a lockdown, and is the only way to do it: it prints the path of the lock file it removed, and exits 1 with "no lock

@@ -17,6 +17,7 @@ type OutFile struct {
 	Data    []byte
 	Caption string // the client cuts it to what Telegram allows (1024 characters)
 	Photo   bool   // show it as a photo if Telegram can; otherwise it goes as a document
+	Voice   bool   // play it as a voice message (OGG with Opus, MP3 or M4A) if Telegram can; otherwise it goes as a document
 	Buttons [][]Button
 }
 

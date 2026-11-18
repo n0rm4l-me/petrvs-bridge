@@ -173,8 +173,11 @@ func upParseMeta(m map[string]string, max int64) (fm upFileMeta, problem string)
 	}
 	fm.parts, fm.size, fm.sha = int(parts), size, strings.ToLower(m[wire.MetaSHA])
 	fm.kind = "document"
-	if m[wire.MetaKind] == "photo" {
+	switch m[wire.MetaKind] {
+	case "photo":
 		fm.kind = "photo"
+	case "voice":
+		fm.kind = "voice"
 	}
 	return fm, ""
 }
@@ -495,12 +498,15 @@ func (h *Hub) upMissing(ctx context.Context, name, key string, fm upFileMeta, ha
 // upload gives a finished file to Telegram. It returns true when the file is dealt with: in the chat, or refused for good.
 func (h *Hub) upUpload(ctx context.Context, name, key string, fm upFileMeta, caption string, data []byte, sender telegram.FileSender) bool {
 	u := &h.up
-	photo := fm.kind == "photo" && filetx.Kind(fm.name, int64(len(data))) == "photo" // the hub decides from the name and size itself
+	// What the file is shown as is decided by the hub from the name and size itself, not taken from the agent.
 	kind := "document"
-	if photo {
+	switch {
+	case fm.kind == "voice" && filetx.IsVoice(fm.name):
+		kind = "voice"
+	case fm.kind == "photo" && filetx.Kind(fm.name, int64(len(data))) == "photo":
 		kind = "photo"
 	}
-	ids, err := sender.SendFile(ctx, h.cfg.ChatID, telegram.OutFile{Name: fm.name, Data: data, Caption: h.tag(name) + upCaption(caption, fm.name), Photo: photo})
+	ids, err := sender.SendFile(ctx, h.cfg.ChatID, telegram.OutFile{Name: fm.name, Data: data, Caption: h.tag(name) + upCaption(caption, fm.name), Photo: kind == "photo", Voice: kind == "voice"})
 	h.track(name, ids)
 	if err == nil {
 		h.log.Info("uploaded a file to the chat", "agent", name, "kind", kind, "bytes", len(data))

@@ -38,7 +38,7 @@ const (
 	MetaName     = "name"   // file: file name, without a directory
 	MetaSize     = "size"   // file: size in bytes
 	MetaSHA      = "sha"    // file: SHA-256 of the whole file, hex
-	MetaKind     = "kind"   // file: "photo" (shown as a picture) or "document"
+	MetaKind     = "kind"   // file: "photo" (shown as a picture), "voice" (played as a voice message) or "document"
 	MetaPrompt   = "prompt" // key: hash of the prompt the key answers; the agent presses it only if that prompt is still shown
 	MetaEcho     = "echo"   // key: "mode" asks the agent to report the permission mode after pressing the key
 	MetaCommand  = "cmd"    // dropped: id of the command that could not be carried out, so that the hub can mark its message
