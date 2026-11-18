@@ -3,7 +3,9 @@ package worker
 import (
 	"context"
 	"io"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/n0rm4l-me/petrvs-bridge/internal/spool"
@@ -15,6 +17,7 @@ func ExecLauncher(command string) Launcher {
 	return func(ctx context.Context, args []string, dir string) (Process, error) {
 		cmd := exec.CommandContext(ctx, command, args...)
 		cmd.Dir = dir
+		cmd.Env = ScrubEnv(os.Environ())
 		stdin, err := cmd.StdinPipe()
 		if err != nil {
 			return nil, err
@@ -91,4 +94,23 @@ func (o SpoolOutbox) add(it spool.Item) {
 	if err := o.Spool.AddItem(it); err != nil && o.OnError != nil {
 		o.OnError(err)
 	}
+}
+
+// ScrubEnv is the environment for the assistant: the agent's own, without what belongs to the agent. The assistant's shell, and
+// the tools it runs, would otherwise carry the path of the agent's private key, of its cloud credentials and the token of the
+// chat. What `agent send-file` needs (the state directory and the settings of the inbox) stays.
+func ScrubEnv(env []string) []string {
+	keep := map[string]bool{"PB_STATE_DIR": true, "PB_WORKDIR": true, "PB_INBOX_DIR": true, "PB_MAX_FILE_BYTES": true}
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		switch {
+		case strings.HasPrefix(name, "PB_") && !keep[name]:
+			continue
+		case strings.HasPrefix(name, "TELEGRAM_"), strings.HasPrefix(name, "SLACK_"), name == "GOOGLE_APPLICATION_CREDENTIALS":
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }

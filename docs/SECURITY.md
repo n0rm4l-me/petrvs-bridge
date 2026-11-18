@@ -89,7 +89,9 @@
   user of the agent with that user's files and credentials (a command that is allowed by an anchored pattern but does something else
   through a script it runs is allowed all the same); the assistant reads files and web pages that may hold instructions of their
   own, and what it does then is limited only by the policy and by the dialogs, so keep the working directory and the credentials of
-  that user to what the work needs; the process of the assistant is capped by a budget and a time limit, which bound what a loop can
+  that user to what the work needs (the process does not inherit the agent's own secrets, the path of its key, its cloud
+  credentials and the chat tokens, and a read of a key, `.ssh`, `.env` or the bridge's own keys is flagged and asked about, but
+  the files stay readable by that user); the process of the assistant is capped by a budget and a time limit, which bound what a loop can
   spend, not what it can do. A button is bound to its dialog by a keyed hash that includes the number of the request, so an old tap
   cannot answer a later request, and a dialog nobody answers is refused after `PB_WORKER_APPROVAL_TIMEOUT`.
 

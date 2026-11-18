@@ -1,5 +1,5 @@
 {
-  "allow_tools": ["Read", "Glob", "Grep", "LS", "NotebookRead", "TodoWrite", "Task"],
+  "allow_tools": ["TodoWrite", "Task"],
   "allow_bash": [
     "^git (status|diff|log|show|branch)( [^;&|]*)?$",
     "^go (build|vet|test)( [^;&|]*)?$",

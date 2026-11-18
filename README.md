@@ -419,13 +419,18 @@ answer in `PB_WORKER_APPROVAL_TIMEOUT` is refused, and the assistant is told not
 from the chat is refused, as it is for a prompt in tmux.
 
 **The policy** (`PB_WORKER_POLICY_FILE`, JSON, [examples/worker-policy.json](examples/worker-policy.json)) has five lists, each
-replacing its default when present: `allow_tools` (tools that run without asking; the default is the read-only ones and the helper
-tools), `allow_bash` (anchored regular expressions for commands that run without asking), `deny_bash` (refused without asking the
+replacing its default when present: `allow_tools` (tools that run without asking; the default is the helper tools TodoWrite and Task:
+the assistant allows reads inside the working directory itself, and a read outside it is a question for the chat), `allow_bash` (anchored regular expressions for commands that run without asking), `deny_bash` (refused without asking the
 chat), `risky_bash` (always put to the chat, flagged in the dialog with what is risky, even when an allow pattern matches: by default
-`kubectl apply`, `terraform apply`, `gh pr merge`, `git push`, `helm upgrade` and the like) and `risky_paths` (writes to `.env`, keys,
-credentials). The assistant already runs harmless commands (`echo`, reading files) without asking, so the policy only sees what would
+`kubectl apply`, `terraform apply`, `gh pr merge`, `git push`, `helm upgrade` and the like) and `risky_paths` (reads and writes of `.env`, keys,
+credentials and the bridge's own keys, flagged in the dialog). The assistant already runs harmless commands (`echo`, reading files) without asking, so the policy only sees what would
 prompt. It is a gate, not a sandbox: the assistant runs as the user of the agent, so give it a directory in `PB_WORKDIR`, keep the
 credentials of that user to what the work needs, and for unattended work use a user of its own.
+
+**What the assistant inherits.** Its process gets the environment of the agent without what belongs to the agent: the path of the
+agent's private key, the cloud credentials (`GOOGLE_APPLICATION_CREDENTIALS`), the chat tokens and the other `PB_*` settings, except
+the state directory, the working directory and the inbox settings that `agent send-file` needs. The files themselves are still
+readable by the same user, which is why a read of the bridge's keys, of `.ssh` or of `.env` is flagged and goes to the chat.
 
 **Instructions for the assistant** (`PB_WORKER_PROMPT_FILE`, [examples/worker-telegram-prompt.md](examples/worker-telegram-prompt.md))
 are added to its system prompt: how to answer on a phone, how to ask (call the tool; the dialog is the question), how to send a file

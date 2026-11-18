@@ -17,8 +17,13 @@ func TestTheDefaultPolicy(t *testing.T) {
 		want  Action
 		risk  string
 	}{
-		{"read", "Read", map[string]any{"file_path": "/a"}, Allow, ""},
-		{"grep", "Grep", nil, Allow, ""},
+		{"a read outside the workdir asks", "Read", map[string]any{"file_path": "/etc/hosts"}, Ask, ""},
+		{"a search outside the workdir asks", "Grep", map[string]any{"path": "/var/log"}, Ask, ""},
+		{"reading ssh keys is flagged", "Read", map[string]any{"file_path": "/home/me/.ssh/id_ed25519"}, Ask, "touches a secrets or credentials path"},
+		{"reading an identity file is flagged", "Read", map[string]any{"file_path": "/home/me/.config/petrvs-bridge/keys/mac.identity.json"}, Ask, "touches an identity (private key) file of the bridge"},
+		{"listing the bridge credentials is flagged", "LS", map[string]any{"path": "/home/me/.config/petrvs-bridge/cloud-auth"}, Ask, "touches the keys or credentials of the bridge"},
+		{"a search of aws config is flagged", "Grep", map[string]any{"path": "/home/me/.aws"}, Ask, "touches a secrets or credentials path"},
+		{"the todo list", "TodoWrite", nil, Allow, ""},
 		{"a subagent", "Task", nil, Allow, ""},
 		{"an unknown tool asks", "Mystery", nil, Ask, ""},
 		{"web fetch asks", "WebFetch", nil, Ask, ""},
@@ -79,8 +84,11 @@ func TestAPolicyFileReplacesOnlyTheListsItHas(t *testing.T) {
 	if d := p.Decide("Bash", bash("rm -rf /")); d.Action != Deny {
 		t.Errorf("the default deny list was lost: %+v", d)
 	}
-	if d := p.Decide("Glob", nil); d.Action != Ask {
+	if d := p.Decide("TodoWrite", nil); d.Action != Ask {
 		t.Errorf("allow_tools did not replace the default: %+v", d)
+	}
+	if d := p.Decide("Read", map[string]any{"file_path": "/home/me/.ssh/id_rsa"}); d.Action != Ask || d.Risk == "" {
+		t.Errorf("a tool in allow_tools reads a secret without a flag: %+v", d)
 	}
 }
 

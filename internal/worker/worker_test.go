@@ -360,12 +360,12 @@ func TestThePolicyAllowsDeniesAndFlags(t *testing.T) {
 	f := r.proc(t, 1)
 	nextSent(t, f)
 
-	f.toolRequest("a", "Read", map[string]any{"file_path": "/tmp/x"}, "")
-	if id, b, _, in := decision(t, nextSent(t, f)); id != "a" || b != "allow" || in["file_path"] != "/tmp/x" {
-		t.Fatalf("a read: %s %s %v", id, b, in)
+	f.toolRequest("a", "TodoWrite", map[string]any{"todos": []any{}}, "")
+	if id, b, _, _ := decision(t, nextSent(t, f)); id != "a" || b != "allow" {
+		t.Fatalf("the todo list: %s %s", id, b)
 	}
 	if r.out.nNotices() != 0 {
-		t.Fatal("a read was put to the chat")
+		t.Fatal("the todo list was put to the chat")
 	}
 
 	f.toolRequest("b", "Bash", map[string]any{"command": "rm -rf /"}, "")
@@ -750,5 +750,38 @@ func TestAnIdThatCannotBeAnIdIsNotUsed(t *testing.T) {
 	r.proc(t, 1)
 	if contains(r.argsOf(1), "--resume") {
 		t.Fatalf("an id from a file that is not an id was passed on: %v", r.argsOf(1))
+	}
+}
+
+func TestAReadOfASecretComesToTheChatFlagged(t *testing.T) {
+	r := newRig(t, nil)
+	_ = r.w.SendText(context.Background(), "go")
+	f := r.proc(t, 1)
+	nextSent(t, f)
+	f.toolRequest("r", "Read", map[string]any{"file_path": "/home/me/.config/petrvs-bridge/keys/mac.identity.json"}, "")
+	eventually(t, "the dialog", func() bool { return r.out.nNotices() == 1 })
+	if scr := capture(t, r.w); !strings.Contains(scr, "⚠ touches an identity (private key) file of the bridge") {
+		t.Fatalf("the dialog does not flag the read:\n%s", scr)
+	}
+	noSent(t, f, 50*time.Millisecond)
+}
+
+func TestTheAssistantDoesNotInheritTheSecretsOfTheAgent(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin", "HOME=/home/me", "LANG=en_US.UTF-8", "HTTPS_PROXY=http://proxy:3128", "ANTHROPIC_MODEL=x",
+		"PB_STATE_DIR=/state", "PB_WORKDIR=/work", "PB_INBOX_DIR=/work/.inbox", "PB_MAX_FILE_BYTES=1000",
+		"PB_IDENTITY=/keys/mac.identity.json", "PB_HUB_PUB=/keys/hub.pub.json", "PB_ALARM_SECRET_FILE=/s", "PB_NAME=mac", "PB_PROJECT=p",
+		"GOOGLE_APPLICATION_CREDENTIALS=/cloud-auth/credential_config.json", "TELEGRAM_BOT_TOKEN=1:abc", "SLACK_BOT_TOKEN=xoxb-1",
+	}
+	got := strings.Join(ScrubEnv(in), "\n")
+	for _, want := range []string{"PATH=", "HOME=", "LANG=", "HTTPS_PROXY=", "ANTHROPIC_MODEL=", "PB_STATE_DIR=", "PB_WORKDIR=", "PB_INBOX_DIR=", "PB_MAX_FILE_BYTES="} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%s was taken away from the assistant", want)
+		}
+	}
+	for _, gone := range []string{"PB_IDENTITY", "PB_HUB_PUB", "PB_ALARM_SECRET_FILE", "PB_NAME", "PB_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS", "TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("%s reaches the assistant", gone)
+		}
 	}
 }

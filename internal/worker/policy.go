@@ -40,7 +40,7 @@ type PolicyFile struct {
 	DenyBash []string `json:"deny_bash"`
 	// RiskyBash are regular expressions for Bash commands that always go to the chat, flagged, even when AllowBash matches.
 	RiskyBash []string `json:"risky_bash"`
-	// RiskyPaths are regular expressions for the paths that Write, Edit and NotebookEdit touch and that are flagged.
+	// RiskyPaths are regular expressions for the paths that the file tools (Read, Write, Edit, Glob, Grep, ...) touch and that are flagged.
 	RiskyPaths []string `json:"risky_paths"`
 }
 
@@ -63,7 +63,9 @@ type Policy struct {
 // The defaults: read-only tools and the helper tools of the assistant run without asking, nothing else does; a few commands that
 // cannot be meant are refused; commands that change infrastructure or secrets are flagged in the dialog.
 var (
-	defaultAllowTools = []string{"Read", "Glob", "Grep", "LS", "NotebookRead", "TodoWrite", "Task"}
+	// Reads inside the working directory never reach the policy: the assistant allows them itself. A read that does reach it is
+	// outside that directory, and is a question for the chat, so Read, Glob and Grep are not in the default list.
+	defaultAllowTools = []string{"TodoWrite", "Task"}
 	defaultDenyBash   = []string{
 		`(^|[;&|]\s*)rm\s+(-[a-zA-Z]*\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(-[a-zA-Z]+\s+)*/\*?\s*($|[;&|])`,
 		`(^|[;&|]\s*)mkfs(\.\w+)?\s`,
@@ -83,6 +85,8 @@ var (
 	defaultRiskyPaths = []riskRule{
 		{regexp.MustCompile(`(^|/)\.(env|ssh|aws|kube|gnupg)(/|$|\.)`), "touches a secrets or credentials path"},
 		{regexp.MustCompile(`(?i)(\.pem|\.key|\.p12|\.pfx|id_rsa|id_ed25519|credentials[^/]*)$`), "touches a key or credentials file"},
+		{regexp.MustCompile(`(^|/)[^/]*\.identity\.json$`), "touches an identity (private key) file of the bridge"},
+		{regexp.MustCompile(`(^|/)petrvs-bridge/(keys|cloud-auth|handoff)(/|$)`), "touches the keys or credentials of the bridge"},
 	}
 )
 
@@ -191,14 +195,17 @@ func (p *Policy) Decide(tool string, input map[string]any) Decision {
 			}
 		}
 		return Decision{Action: Ask}
-	case "Write", "Edit", "MultiEdit", "NotebookEdit":
-		path, _ := input["file_path"].(string)
-		if path == "" {
-			path, _ = input["notebook_path"].(string)
-		}
-		for _, r := range p.riskyPaths {
-			if r.re.MatchString(path) {
-				return Decision{Action: Ask, Risk: r.label}
+	case "Write", "Edit", "MultiEdit", "NotebookEdit", "Read", "NotebookRead", "Glob", "Grep", "LS":
+		// Reading a secret is as much a risk as writing one: what is read lands in the conversation.
+		for _, key := range []string{"file_path", "notebook_path", "path"} {
+			path, _ := input[key].(string)
+			if path == "" {
+				continue
+			}
+			for _, r := range p.riskyPaths {
+				if r.re.MatchString(path) {
+					return Decision{Action: Ask, Risk: r.label}
+				}
 			}
 		}
 	}
