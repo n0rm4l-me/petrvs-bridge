@@ -688,6 +688,11 @@ make vuln            # govulncheck: known vulnerabilities in the code paths this
 `PUBSUB_EMULATOR_HOST` is unset, on port 18085 or `PB_EMULATOR_PORT`, and stops only that one). If something else already
 listens on that port it refuses to run instead of using or stopping it. Tests that need the emulator are skipped without it.
 
+The smoke tests of worker mode (`internal/smoke/worker_test.go`) need no emulator: they run the real `hub` and `agent` against the fake
+Pub/Sub server of the client library, built from the module `internal/smoke/pubsubfake` (a module of its own, so that the bridge does
+not depend on it; it needs the network the first time) and a fake Telegram, with a scripted assistant (needs `jq`). With
+`PB_TEST_REAL_CLAUDE=1` they, and the tests of `internal/worker`, start the real `claude` instead (small model, a budget of 0.25 USD).
+
 Layout: `internal/ratchet` (the double ratchet), `internal/handshake`, `internal/identity`, `internal/wire` (framing and
 payloads), `internal/transport` (Pub/Sub and an in-memory bus with attack helpers), `internal/hubsvc`,
 `internal/agentsvc`, `internal/alarm`, `internal/approval` (one-time codes), `internal/spool`, `internal/tmuxctl`,
