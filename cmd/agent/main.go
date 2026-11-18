@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -32,6 +33,7 @@ import (
 	"github.com/n0rm4l-me/petrvs-bridge/internal/tmuxctl"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/transport"
 	"github.com/n0rm4l-me/petrvs-bridge/internal/wire"
+	"github.com/n0rm4l-me/petrvs-bridge/internal/worker"
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Getenv, os.Stdin)) }
@@ -185,10 +187,20 @@ func serve(args []string, getenv func(string) string) int {
 	log.Info("agent identity", "name", id.Name, "fingerprint", id.Public().Fingerprint())
 	log.Info("pinned hub", "name", hub.Name, "fingerprint", hub.Fingerprint())
 
-	ex, err := tmuxctl.New(cfg.TmuxSession, nil)
-	if err != nil {
-		log.Error("invalid tmux session name", "err", err)
-		return 1
+	// Where the text goes: a tmux session, or, in worker mode, an assistant that the agent starts itself (built below, once the
+	// spool is open: the worker answers into it).
+	var (
+		ex  agentsvc.Executor
+		scr agentsvc.Screen
+		wk  *worker.Worker
+	)
+	if !cfg.Worker.Enabled {
+		tx, err := tmuxctl.New(cfg.TmuxSession, nil)
+		if err != nil {
+			log.Error("invalid tmux session name", "err", err)
+			return 1
+		}
+		ex, scr = tx, tx
 	}
 	// Everything the agent keeps (spool, lock, alarm state, used codes) is private to its user.
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err == nil {
@@ -211,6 +223,31 @@ func serve(args []string, getenv func(string) string) int {
 	if err != nil {
 		log.Error("cannot open the spool", "err", err)
 		return 1
+	}
+	if cfg.Worker.Enabled {
+		policy := worker.DefaultPolicy()
+		if cfg.Worker.PolicyFile != "" {
+			if policy, err = worker.LoadPolicy(cfg.Worker.PolicyFile); err != nil {
+				log.Error("cannot load the worker policy", "err", err)
+				return 1
+			}
+		}
+		turn := cfg.Worker.TurnTimeout
+		if turn == 0 {
+			turn = -1 // no limit
+		}
+		wk, err = worker.New(worker.Config{
+			Name: cfg.AssistantName, Command: cfg.Worker.Command, Workdir: cfg.Workdir, Model: cfg.Worker.Model,
+			BudgetUSD: cfg.Worker.BudgetUSD, PromptFile: cfg.Worker.PromptFile, SettingSources: cfg.Worker.SettingSources,
+			Policy: policy, SessionFile: filepath.Join(cfg.StateDir, "worker-session"), TurnTimeout: turn, ApprovalTimeout: cfg.Worker.ApprovalTimeout, Log: log,
+			Out: worker.SpoolOutbox{Spool: sp, OnError: func(err error) { log.Warn("could not queue a message of the worker", "err", err) }},
+		})
+		if err != nil {
+			log.Error("invalid worker configuration", "err", err)
+			return 1
+		}
+		defer wk.Close()
+		ex, scr = wk, wk
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -246,8 +283,16 @@ func serve(args []string, getenv func(string) string) int {
 		Identity: id, Hub: hub, Transport: tr, Names: names, Exec: ex, Spool: sp, LockFile: cfg.LockFile, Log: log,
 		HeartbeatEvery: cfg.Heartbeat, HandshakeEvery: cfg.Handshake, SilenceLimit: cfg.Silence, ReceiptTimeout: cfg.ReceiptTimeout,
 		ReorderWindow: cfg.ReorderWindow,
-		Info:          func() map[string]string { return map[string]string{"host": host, "os": runtime.GOOS} },
-		Screen:        ex,
+		Info: func() map[string]string {
+			facts := map[string]string{"host": host, "os": runtime.GOOS}
+			if wk != nil {
+				for k, v := range wk.Facts() {
+					facts[k] = v
+				}
+			}
+			return facts
+		},
+		Screen: scr,
 		Ext: agentsvc.Extras{
 			AssistantName: cfg.AssistantName,
 			Workdir:       cfg.Workdir, InboxDir: cfg.InboxDir, StateDir: cfg.StateDir, MaxFileBytes: cfg.MaxFileBytes, StuckAfter: cfg.StuckAfter,
@@ -283,7 +328,11 @@ func serve(args []string, getenv func(string) string) int {
 		log.Error("invalid agent configuration", "err", err)
 		return 1
 	}
-	log.Info("agent running", "tmux_session", cfg.TmuxSession, "pull", cfg.Pull)
+	if wk != nil {
+		log.Info("agent running", "mode", "worker", "workdir", cfg.Workdir, "pull", cfg.Pull)
+	} else {
+		log.Info("agent running", "tmux_session", cfg.TmuxSession, "pull", cfg.Pull)
+	}
 	if err := ag.Run(ctx); err != nil {
 		log.Error("agent stopped", "err", err)
 		return 1

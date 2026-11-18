@@ -1,0 +1,23 @@
+{
+  "allow_tools": ["Read", "Glob", "Grep", "LS", "NotebookRead", "TodoWrite", "Task"],
+  "allow_bash": [
+    "^git (status|diff|log|show|branch)( [^;&|]*)?$",
+    "^go (build|vet|test)( [^;&|]*)?$",
+    "^make (build|test|vet)$"
+  ],
+  "deny_bash": [
+    "(^|[;&|]\\s*)rm\\s+(-[a-zA-Z]*\\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\\s+(-[a-zA-Z]+\\s+)*/\\*?\\s*($|[;&|])",
+    "(^|[;&|]\\s*)mkfs(\\.\\w+)?\\s",
+    "(^|[;&|]\\s*)dd\\s+.*\\bof=/dev/"
+  ],
+  "risky_bash": [
+    "\\bkubectl\\b.*\\b(apply|delete|patch|scale|replace|annotate|label|edit|rollout|drain|cordon|create|set)\\b",
+    "\\bterraform\\b.*\\b(apply|destroy|import|state\\s+(rm|mv))\\b",
+    "\\bgh\\s+pr\\s+merge\\b",
+    "\\bgit\\s+push\\b"
+  ],
+  "risky_paths": [
+    "(^|/)\\.(env|ssh|aws|kube|gnupg)(/|$|\\.)",
+    "(?i)(\\.pem|\\.key|\\.p12|\\.pfx|id_rsa|id_ed25519|credentials[^/]*)$"
+  ]
+}

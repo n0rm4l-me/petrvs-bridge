@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -118,6 +119,28 @@ type Agent struct {
 	HealWindow       time.Duration
 	// StuckAfter is how long a request may go without a reply before the chat is told; 0 turns the check off.
 	StuckAfter time.Duration
+	// Worker holds the settings of the worker mode, in which the assistant runs without a terminal.
+	Worker WorkerSettings
+}
+
+// WorkerSettings are the settings of the worker mode (PB_WORKER): the agent starts the assistant itself, as a child process in its
+// headless mode, instead of typing into a tmux session. It needs Workdir.
+type WorkerSettings struct {
+	Enabled bool
+	// Command is the assistant's program (default "claude"); Model is passed to it when set.
+	Command string
+	Model   string
+	// BudgetUSD is the most one process of the assistant may spend; negative means no limit.
+	BudgetUSD float64
+	// PromptFile holds the extra instructions for the assistant (how to work through the chat); PolicyFile is the JSON policy that
+	// says which requests for a tool go to the chat. Both are absolute paths, and both are optional.
+	PromptFile string
+	PolicyFile string
+	// SettingSources says which settings of Claude Code the process loads (default "project,local").
+	SettingSources string
+	// TurnTimeout is how long one request may run (0 for no limit), ApprovalTimeout how long a dialog waits for the chat.
+	TurnTimeout     time.Duration
+	ApprovalTimeout time.Duration
 }
 
 // MaxFileLimit is the most a file may be allowed to weigh: what a bot can upload to Telegram.
@@ -187,6 +210,19 @@ func (e *env) int64(key string) int64 {
 		e.err = append(e.err, fmt.Sprintf("%s: %q is not a number", key, v))
 	}
 	return n
+}
+
+func (e *env) float64(key string, def float64) float64 {
+	v := strings.TrimSpace(e.get(key))
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		e.err = append(e.err, fmt.Sprintf("%s: %q is not a number", key, v))
+		return def
+	}
+	return f
 }
 
 func (e *env) boolean(key string, def bool) bool {
@@ -515,6 +551,15 @@ func ParseAgent(args []string, getenv func(string) string) (*Agent, error) {
 	healTries := fs.Int("heal-tries", int(e.int64("PB_HEAL_TRIES")), "starts allowed within the heal window before auto-heal gives up; 0 means 3 (env PB_HEAL_TRIES)")
 	fs.DurationVar(&a.HealWindow, "heal-window", e.dur("PB_HEAL_WINDOW", 10*time.Minute), "the window the heal tries are counted in (env PB_HEAL_WINDOW)")
 	stuck := fs.String("stuck-after", e.str("PB_STUCK_AFTER", "10m"), "tell the chat when a request has had no reply for this long; 0 or off turns it off (env PB_STUCK_AFTER)")
+	fs.BoolVar(&a.Worker.Enabled, "worker", e.boolean("PB_WORKER", false), "run the assistant without a terminal, as a child process; needs PB_WORKDIR (env PB_WORKER)")
+	fs.StringVar(&a.Worker.Command, "worker-command", e.str("PB_WORKER_COMMAND", "claude"), "the assistant's program in worker mode (env PB_WORKER_COMMAND)")
+	fs.StringVar(&a.Worker.Model, "worker-model", e.str("PB_WORKER_MODEL", ""), "the model the assistant uses in worker mode; empty leaves its own choice (env PB_WORKER_MODEL)")
+	fs.Float64Var(&a.Worker.BudgetUSD, "worker-budget-usd", e.float64("PB_WORKER_BUDGET_USD", 5), "the most one assistant process may spend, in USD; negative for no limit (env PB_WORKER_BUDGET_USD)")
+	fs.StringVar(&a.Worker.PromptFile, "worker-prompt-file", e.str("PB_WORKER_PROMPT_FILE", ""), "file with extra instructions for the assistant, for example how to work through the chat; read at each start (env PB_WORKER_PROMPT_FILE)")
+	fs.StringVar(&a.Worker.PolicyFile, "worker-policy-file", e.str("PB_WORKER_POLICY_FILE", ""), "JSON policy: which requests for a tool run without asking, which are refused and which are flagged (env PB_WORKER_POLICY_FILE)")
+	fs.StringVar(&a.Worker.SettingSources, "worker-setting-sources", e.str("PB_WORKER_SETTING_SOURCES", "project,local"), "which settings of Claude Code the assistant loads; the user's are left out by default, their hooks would answer twice (env PB_WORKER_SETTING_SOURCES)")
+	workerTurn := fs.String("worker-turn-timeout", e.str("PB_WORKER_TURN_TIMEOUT", "30m"), "how long one request may run before it is interrupted; 0 or off for no limit (env PB_WORKER_TURN_TIMEOUT)")
+	fs.DurationVar(&a.Worker.ApprovalTimeout, "worker-approval-timeout", e.dur("PB_WORKER_APPROVAL_TIMEOUT", 30*time.Minute), "how long a dialog waits for an answer before the request is refused (env PB_WORKER_APPROVAL_TIMEOUT)")
 	if err := parseFlags(fs, args); err != nil {
 		return nil, err
 	}
@@ -553,6 +598,27 @@ func ParseAgent(args []string, getenv func(string) string) (*Agent, error) {
 	}
 	if strings.TrimSpace(a.AssistantCommand) == "" || strings.ContainsAny(a.AssistantCommand, "\x00\n\r") {
 		e.err = append(e.err, "assistant-command: one line, not empty")
+	}
+	a.Worker.TurnTimeout = parseOffDuration(e, "PB_WORKER_TURN_TIMEOUT", *workerTurn)
+	if a.Worker.Enabled {
+		w := &a.Worker
+		switch {
+		case a.Workdir == "":
+			e.err = append(e.err, "worker: PB_WORKER needs PB_WORKDIR, the directory the assistant works in")
+		case a.Heal:
+			e.err = append(e.err, "worker: PB_HEAL is for the tmux session and has no use in worker mode; the worker starts the assistant itself")
+		}
+		if strings.TrimSpace(w.Command) == "" || strings.ContainsAny(w.Command, "\x00\n\r") {
+			e.err = append(e.err, "worker-command: one line, not empty")
+		}
+		for name, path := range map[string]string{"worker-prompt-file": w.PromptFile, "worker-policy-file": w.PolicyFile} {
+			if path != "" && !filepath.IsAbs(path) {
+				e.err = append(e.err, name+": an absolute path")
+			}
+		}
+		if w.BudgetUSD == 0 {
+			w.BudgetUSD = 5
+		}
 	}
 	a.SpoolDir = filepath.Join(a.StateDir, "spool")
 	a.LockFile = filepath.Join(a.StateDir, "locked")
