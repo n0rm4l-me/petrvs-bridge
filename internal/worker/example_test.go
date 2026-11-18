@@ -34,7 +34,7 @@ func TestTheExamplePromptTellsHowToAnswerThroughTheChat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"agent send-file", "-voice", "/clear", "Never print secrets"} {
+	for _, want := range []string{"agent send-file", "-voice", "/clear", "Never print secrets", "## No interaction", "Never write a table", "under 34 characters", "one complete answer"} {
 		if !strings.Contains(b, want) {
 			t.Errorf("the example prompt does not mention %q", want)
 		}

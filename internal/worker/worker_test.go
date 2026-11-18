@@ -785,3 +785,52 @@ func TestTheAssistantDoesNotInheritTheSecretsOfTheAgent(t *testing.T) {
 		}
 	}
 }
+
+func TestTheAssistantIsNotOfferedTheToolsThatNeedAPersonAtATerminal(t *testing.T) {
+	r := newRig(t, nil)
+	_ = r.w.SendText(context.Background(), "go")
+	r.proc(t, 1)
+	if !contains(r.argsOf(1), "--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode") {
+		t.Fatalf("args %v", r.argsOf(1))
+	}
+	// Nothing is taken away when the list is empty.
+	r2 := newRig(t, func(c *Config) { c.DisallowedTools = []string{} })
+	_ = r2.w.SendText(context.Background(), "go")
+	r2.proc(t, 1)
+	if contains(r2.argsOf(1), "--disallowedTools") {
+		t.Fatalf("args %v", r2.argsOf(1))
+	}
+}
+
+func TestAQuestionToTheUserIsRefusedWithAdviceAndNotAskedInTheChat(t *testing.T) {
+	for _, tool := range []string{"AskUserQuestion", "ExitPlanMode", "EnterPlanMode"} {
+		r := newRig(t, nil)
+		_ = r.w.SendText(context.Background(), "go")
+		f := r.proc(t, 1)
+		nextSent(t, f)
+		f.toolRequest("q", tool, map[string]any{"questions": []any{map[string]any{"question": "Which one?"}}}, "")
+		id, behavior, msg, _ := decision(t, nextSent(t, f))
+		if id != "q" || behavior != "deny" || !strings.Contains(msg, "sensible default") || !strings.Contains(msg, "say in your answer what you assumed") {
+			t.Fatalf("%s: %s %s %q", tool, id, behavior, msg)
+		}
+		time.Sleep(30 * time.Millisecond)
+		if r.out.nNotices() != 0 {
+			t.Fatalf("%s: the chat was told of a refusal that is how the worker works: %q", tool, r.out.notice(0).body)
+		}
+	}
+}
+
+func TestTheHooksOfTheProjectAreSwitchedOff(t *testing.T) {
+	r := newRig(t, nil)
+	_ = r.w.SendText(context.Background(), "go")
+	r.proc(t, 1)
+	if !contains(r.argsOf(1), "--settings", `{"disableAllHooks":true}`) {
+		t.Fatalf("args %v", r.argsOf(1))
+	}
+	r2 := newRig(t, func(c *Config) { c.Settings = "none" })
+	_ = r2.w.SendText(context.Background(), "go")
+	r2.proc(t, 1)
+	if contains(r2.argsOf(1), "--settings") {
+		t.Fatalf("args %v", r2.argsOf(1))
+	}
+}

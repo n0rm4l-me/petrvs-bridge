@@ -432,14 +432,23 @@ agent's private key, the cloud credentials (`GOOGLE_APPLICATION_CREDENTIALS`), t
 the state directory, the working directory and the inbox settings that `agent send-file` needs. The files themselves are still
 readable by the same user, which is why a read of the bridge's keys, of `.ssh` or of `.env` is flagged and goes to the chat.
 
+**No interaction.** The user sends a message and waits for one answer, so the tools that need a person at a terminal (questions to
+the user, plan mode) are taken away from the assistant (`--disallowedTools`), and the policy refuses them if they are called all the
+same, with the advice to choose a sensible default and say what was assumed (`deny_tools` in the policy changes the list). The
+example instructions say the same in words, and add what is specific to a phone: no tables, short lines, answers that stand on their own.
+
 **Instructions for the assistant** (`PB_WORKER_PROMPT_FILE`, [examples/worker-telegram-prompt.md](examples/worker-telegram-prompt.md))
 are added to its system prompt: how to answer on a phone, how to ask (call the tool; the dialog is the question), how to send a file
 or a voice message, what never to print. The assistant's shell inherits the environment of the agent, so `agent send-file` works there when `agent` is on the `PATH` (and `PB_STATE_DIR` is set for the agent if it is not the default). The file is read each time the process starts, so a change applies from the next
 conversation (`/clear`) without a restart of the agent.
 
-**Settings of Claude Code.** The worker loads `project` and `local` settings and leaves out the user's (`PB_WORKER_SETTING_SOURCES`):
-the user's hooks (the Stop hook of this bridge, for one) would send every answer to the chat a second time, since the worker sends
-it itself. Set `user,project,local` to load them, and then do not install the bridge's hooks.
+**Settings of Claude Code.** The worker loads the `project` and `local` settings of `PB_WORKDIR` and leaves out the user's
+(`PB_WORKER_SETTING_SOURCES`), and it switches every hook off (`--settings '{"disableAllHooks":true}'`): the hooks of a project (the
+Stop hook of this bridge, for one) would send each answer to the chat a second time, since the worker sends it itself. Leaving the
+user's settings out matters for another reason: their `permissions.allow` rules (`Bash(kubectl *)`, say) let a command run without a
+dialog, and then the policy never sees it. The cost is that whatever the user's settings hold that the assistant needs, such as the
+variables of the API key or of a gateway (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`), must reach the agent in its environment; with
+launchd a small wrapper script can read them from `~/.claude/settings.json` and start the agent with them.
 
 **Limits.** `PB_WORKER_BUDGET_USD` caps what one process of the assistant may spend (the conversation is resumed in a new process,
 which has its own cap; the total is in the status); `PB_WORKER_TURN_TIMEOUT` interrupts a request that runs too long, and kills the

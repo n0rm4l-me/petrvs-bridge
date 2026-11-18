@@ -202,3 +202,25 @@ func TestRealTheChatDrivesTheRealAssistantThroughTheHub(t *testing.T) {
 		t.Fatalf("the approved command did not write the file: %q %v", b, err)
 	}
 }
+
+// The hooks of a project must not fire in the worker: with the bridge's own hooks in the working directory, every answer would go
+// to the chat twice.
+func TestRealTheHooksOfTheProjectDoNotFire(t *testing.T) {
+	w, out, dir := realWorker(t, func(c *Config) { c.SettingSources = "project,local" })
+	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, "hook-fired")
+	hook := `{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "touch ` + marker + `"}]}]}}`
+	if err := os.WriteFile(filepath.Join(dir, ".claude", "settings.local.json"), []byte(hook), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.SendText(context.Background(), "Reply with the single word: ok"); err != nil {
+		t.Fatal(err)
+	}
+	waitReal(t, "the answer", func() bool { return out.nReplies() == 1 })
+	time.Sleep(500 * time.Millisecond) // a Stop hook runs as the turn ends
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a hook of the project fired in the worker")
+	}
+}

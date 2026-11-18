@@ -24,6 +24,9 @@ type Decision struct {
 	Action Action
 	// Reason says why a request was allowed or denied.
 	Reason string
+	// Advice, for a Deny, is what the assistant is told to do instead. When it is set the chat is not told of the refusal: the
+	// refusal is part of how the worker works, not news.
+	Advice string
 	// Risk, for an Ask, names what is risky about the request; the dialog in the chat shows it.
 	Risk string
 }
@@ -33,6 +36,9 @@ type Decision struct {
 type PolicyFile struct {
 	// AllowTools are tools that run without asking (Read, Glob, ...). Bash is never allowed by this list.
 	AllowTools []string `json:"allow_tools"`
+	// DenyTools are tools that are refused without asking. The default is the ones that need a person at a terminal (questions to
+	// the user, plan mode): the user reads in a chat and waits for one answer.
+	DenyTools []string `json:"deny_tools"`
 	// AllowBash are regular expressions for Bash commands that run without asking, unless they are risky. Anchor them:
 	// "^git status$" and not "git status", which also matches "rm x; git status".
 	AllowBash []string `json:"allow_bash"`
@@ -54,6 +60,7 @@ type riskRule struct {
 // asked, flagged), then allow, then ask.
 type Policy struct {
 	allowTools map[string]bool
+	denyTools  map[string]bool
 	allowBash  []*regexp.Regexp
 	denyBash   []*regexp.Regexp
 	riskyBash  []riskRule
@@ -66,7 +73,10 @@ var (
 	// Reads inside the working directory never reach the policy: the assistant allows them itself. A read that does reach it is
 	// outside that directory, and is a question for the chat, so Read, Glob and Grep are not in the default list.
 	defaultAllowTools = []string{"TodoWrite", "Task"}
-	defaultDenyBash   = []string{
+	// DefaultInteractiveTools are the tools that need a person at a terminal. The worker takes them away from the assistant
+	// (--disallowedTools) and the policy refuses them if they are called all the same.
+	DefaultInteractiveTools = []string{"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"}
+	defaultDenyBash         = []string{
 		`(^|[;&|]\s*)rm\s+(-[a-zA-Z]*\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(-[a-zA-Z]+\s+)*/\*?\s*($|[;&|])`,
 		`(^|[;&|]\s*)mkfs(\.\w+)?\s`,
 		`(^|[;&|]\s*)dd\s+.*\bof=/dev/`,
@@ -115,7 +125,14 @@ func LoadPolicy(path string) (*Policy, error) {
 }
 
 func newPolicy(f PolicyFile) (*Policy, error) {
-	p := &Policy{allowTools: map[string]bool{}}
+	p := &Policy{allowTools: map[string]bool{}, denyTools: map[string]bool{}}
+	denied := DefaultInteractiveTools
+	if f.DenyTools != nil {
+		denied = f.DenyTools
+	}
+	for _, t := range denied {
+		p.denyTools[t] = true
+	}
 	tools := defaultAllowTools
 	if f.AllowTools != nil {
 		tools = f.AllowTools
@@ -176,6 +193,10 @@ func compileAll(field string, patterns []string) ([]*regexp.Regexp, error) {
 
 // Decide gives the verdict on one request. input is the tool's input as the assistant sent it.
 func (p *Policy) Decide(tool string, input map[string]any) Decision {
+	if p.denyTools[tool] {
+		return Decision{Action: Deny, Reason: "this tool needs a person at a terminal",
+			Advice: "The user is reading in a chat and waits for one complete answer: do not ask questions back or wait for a choice. Take the most sensible default, do the work, and say in your answer what you assumed. If you are truly blocked, say exactly what is missing and what you would do with it."}
+	}
 	switch tool {
 	case "Bash":
 		cmd, _ := input["command"].(string)

@@ -23,6 +23,8 @@ func TestTheDefaultPolicy(t *testing.T) {
 		{"reading an identity file is flagged", "Read", map[string]any{"file_path": "/home/me/.config/petrvs-bridge/keys/mac.identity.json"}, Ask, "touches an identity (private key) file of the bridge"},
 		{"listing the bridge credentials is flagged", "LS", map[string]any{"path": "/home/me/.config/petrvs-bridge/cloud-auth"}, Ask, "touches the keys or credentials of the bridge"},
 		{"a search of aws config is flagged", "Grep", map[string]any{"path": "/home/me/.aws"}, Ask, "touches a secrets or credentials path"},
+		{"a question to the user is refused", "AskUserQuestion", nil, Deny, ""},
+		{"plan mode is refused", "ExitPlanMode", nil, Deny, ""},
 		{"the todo list", "TodoWrite", nil, Allow, ""},
 		{"a subagent", "Task", nil, Allow, ""},
 		{"an unknown tool asks", "Mystery", nil, Ask, ""},

@@ -79,6 +79,13 @@ type Config struct {
 	ApprovalTimeout time.Duration
 	// MaxQueued bounds the messages that wait for the turn that is running; default 16.
 	MaxQueued int
+	// Settings is JSON passed to the assistant as --settings, on top of the settings it loads. The default switches the hooks off: the
+	// hooks of a project (the Stop hook of this bridge, for one) would send every answer to the chat a second time, since the worker
+	// sends it itself. "none" passes nothing.
+	Settings string
+	// DisallowedTools are the tools taken away from the assistant (--disallowedTools). Nil means DefaultInteractiveTools, the ones
+	// that need a person at a terminal; an empty list takes nothing away.
+	DisallowedTools []string
 
 	Out    Outbox
 	Launch Launcher
@@ -172,6 +179,12 @@ func New(cfg Config) (*Worker, error) {
 	}
 	if cfg.MaxQueued == 0 {
 		cfg.MaxQueued = 16
+	}
+	if cfg.DisallowedTools == nil {
+		cfg.DisallowedTools = DefaultInteractiveTools
+	}
+	if cfg.Settings == "" {
+		cfg.Settings = `{"disableAllHooks":true}`
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -351,6 +364,12 @@ func (w *Worker) args() ([]string, error) {
 	a := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--permission-mode", "manual", "--permission-prompts", "host", "--permission-prompt-tool", "stdio",
 		"--setting-sources", w.cfg.SettingSources}
+	if w.cfg.Settings != "none" {
+		a = append(a, "--settings", w.cfg.Settings)
+	}
+	if len(w.cfg.DisallowedTools) > 0 {
+		a = append(a, "--disallowedTools", strings.Join(w.cfg.DisallowedTools, ","))
+	}
 	if w.cfg.Model != "" {
 		a = append(a, "--model", w.cfg.Model)
 	}
@@ -553,8 +572,13 @@ func (w *Worker) onToolRequest(pr *proc, id string, req *toolRequest) {
 		return
 	case Deny:
 		w.cfg.Log.Warn("tool denied by the policy", "tool", req.ToolName, "reason", d.Reason)
-		_ = pr.respond(id, nil, false, "Refused by the worker's policy: "+d.Reason+". Do not try another way to do the same thing.")
-		w.cfg.Out.Notice("🚫 **"+w.cfg.Name+"** was refused a "+req.ToolName+" request by the policy: "+d.Reason+".", nil)
+		told := "Refused by the worker's policy: " + d.Reason + ". Do not try another way to do the same thing."
+		if d.Advice != "" {
+			told = "Refused: " + d.Reason + ". " + d.Advice
+		} else {
+			w.cfg.Out.Notice("🚫 **"+w.cfg.Name+"** was refused a "+req.ToolName+" request by the policy: "+d.Reason+".", nil)
+		}
+		_ = pr.respond(id, nil, false, told)
 		return
 	}
 
