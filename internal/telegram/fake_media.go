@@ -36,7 +36,7 @@ func (f *Fake) SendFile(_ context.Context, chatID int64, o OutFile) ([]int64, er
 		m.mu.Unlock()
 		return nil, err
 	}
-	m.uploaded = append(m.uploaded, OutFile{Name: o.Name, Data: append([]byte(nil), o.Data...), Caption: o.Caption, Photo: o.Photo, Buttons: o.Buttons})
+	m.uploaded = append(m.uploaded, OutFile{Name: o.Name, Data: append([]byte(nil), o.Data...), Caption: o.Caption, Photo: o.Photo, Voice: o.Voice, Buttons: o.Buttons})
 	m.mu.Unlock()
 	f.mu.Lock()
 	defer f.mu.Unlock()

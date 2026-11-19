@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -23,10 +24,10 @@ const MaxFileCaption = 1024
 // sendFileTimeout is how long an upload may take before the size adds to it (one more second per MiB).
 var sendFileTimeout = 60 * time.Second
 
-// SendFile uploads a file to the chat: as a photo when f.Photo is set and Telegram takes it as one, otherwise as a
-// document. It returns the id Telegram gave to the message. The upload holds the slot that keeps messages in order, so a
-// text written at the same moment waits for it. A rate limit that Telegram asks to wait out for a short while is waited
-// out, as for text; a longer one goes to the caller.
+// SendFile uploads a file to the chat: as a voice message when f.Voice is set, as a photo when f.Photo is set and Telegram
+// takes it as one, otherwise as a document. It returns the id Telegram gave to the message. The upload holds the slot that
+// keeps messages in order, so a text written at the same moment waits for it. A rate limit that Telegram asks to wait out
+// for a short while is waited out, as for text; a longer one goes to the caller.
 func (c *HTTP) SendFile(ctx context.Context, chatID int64, f OutFile) ([]int64, error) {
 	select {
 	case c.sending <- struct{}{}:
@@ -35,13 +36,17 @@ func (c *HTTP) SendFile(ctx context.Context, chatID int64, f OutFile) ([]int64, 
 		return nil, ctx.Err()
 	}
 	method, field := "sendDocument", "document"
-	if f.Photo && int64(len(f.Data)) <= filetx.PhotoMaxBytes {
+	switch {
+	case f.Voice:
+		method, field = "sendVoice", "voice"
+	case f.Photo && int64(len(f.Data)) <= filetx.PhotoMaxBytes:
 		method, field = "sendPhoto", "photo"
 	}
 	ids, err := c.uploadFile(ctx, method, field, chatID, f)
 	var ae *APIError
-	if err != nil && method == "sendPhoto" && errors.As(err, &ae) && ae.Code == 400 {
-		// Telegram refuses some pictures as photos (sides too long or too thin); as a document the same bytes go through.
+	if err != nil && method != "sendDocument" && errors.As(err, &ae) && ae.Code == 400 {
+		// Telegram refuses some pictures as photos (sides too long or too thin) and some audio as a voice message (a format it
+		// cannot play, or the user has forbidden voice messages from bots); as a document the same bytes go through.
 		ids, err = c.uploadFile(ctx, "sendDocument", "document", chatID, f)
 	}
 	return ids, err
@@ -106,11 +111,27 @@ func fileFrame(field string, chatID int64, f OutFile) (head, tail []byte, conten
 	// SafeName leaves nothing that needs quoting in a header: letters, digits and . _ - + ( ) space.
 	h := textproto.MIMEHeader{}
 	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, field, filetx.SafeName(f.Name)))
-	h.Set("Content-Type", "application/octet-stream")
+	h.Set("Content-Type", partType(field, f.Name))
 	if _, err := w.CreatePart(h); err != nil {
 		return nil, nil, "", err
 	}
 	return buf.Bytes(), []byte("\r\n--" + w.Boundary() + "--\r\n"), w.FormDataContentType(), nil
+}
+
+// partType is the Content-Type of the file part. A voice message says what it is made of, as Telegram's own clients do;
+// everything else is plain bytes.
+func partType(field, name string) string {
+	if field == "voice" {
+		switch strings.ToLower(path.Ext(name)) {
+		case ".ogg", ".oga", ".opus":
+			return "audio/ogg"
+		case ".mp3":
+			return "audio/mpeg"
+		case ".m4a":
+			return "audio/mp4"
+		}
+	}
+	return "application/octet-stream"
 }
 
 // post is call for a request with a file: the same rules for the answer (429, errors of the API, unreadable answers) and

@@ -100,6 +100,7 @@ does not lose it.
 | **Files both ways** | Files and screenshots from the machine to the chat; photos and documents from the chat into the machine's inbox. |
 | **Know the state** | A card per machine: online or not, battery, disk, uptime, what runs in tmux, the permission mode, the queue, the lock and the alarm. |
 | **Keep it running** | Auto-heal starts the assistant again when it stops or its session is gone (the command is configurable with `PB_ASSISTANT_COMMAND`). A request that has had no reply for too long is reported. |
+| **Run without a terminal** | Worker mode starts Claude Code itself in its headless mode: permission requests come to the chat as buttons, a policy decides what needs asking, and there is no tmux to scrape. |
 | **Safety switches** | `/lockdown` locks every machine from the chat; only `agent unlock` on the machine lifts it. Alarm mode watches for input at the machine and, with a secret configured, needs a one-time code to disarm. |
 | **Telegram or Slack** | The hub speaks to one chat service at a time. |
 
@@ -213,8 +214,11 @@ A notice that says "(some values are hidden)" has had secrets hidden. A command 
 characters) loses its middle and gets only an Esc button and the line "The command is too long to show here": read it on
 the laptop or with `/screen`, then answer with `/key N`.
 
-**Files from the machine.** `agent send-file [-caption TEXT] PATH` (what Claude runs when you ask it to send you something)
-queues a file for the hub to upload to the chat: a photo for png, jpg and webp up to 10 MiB, otherwise a document. The Stop
+**Files from the machine.** `agent send-file [-caption TEXT] [-voice] PATH` (what Claude runs when you ask it to send you something)
+queues a file for the hub to upload to the chat: a photo for png, jpg and webp up to 10 MiB, otherwise a document. With
+`-voice` an audio file (ogg with Opus, mp3 or m4a; anything else is refused) is sent as a voice message that the chat plays
+with its own player. The hub decides that from the name itself, and when Telegram refuses the voice message (a format it
+cannot play, or the user has forbidden voice messages from bots) the same bytes go as a document; Slack shows it as a file. The Stop
 hook also sends the pictures Claude read during the turn. The agent refuses secrets before anything leaves the machine:
 by name (`.env`, `id_rsa`, `*credential*`; names are compared without regard to case and Unicode variants, so `.AWS` and
 `.awſ` are `.aws`), by place (`~/.ssh`, `~/.aws`, the agent's own state), by content (private keys, tokens) and by identity
@@ -391,6 +395,71 @@ agent types itself go through tmux and do not count as input.
   does not work twice. A locked machine (`/lockdown`) refuses to be disarmed from the chat.
 * Sensors: macOS (`ioreg`, `pmset`) and Linux (`xprintidle`, `lsusb`). The alarm reports which sensors it cannot read.
 
+## Worker mode: the assistant without a terminal
+
+By default the agent types into a tmux session and reads its screen. With `PB_WORKER=true` it needs neither: it starts Claude Code
+itself, as a child process in the headless mode (`claude -p`, JSON lines in and out), in `PB_WORKDIR`. The agent is the same program
+and the hub, the chat, the buttons and `agent send-file` are the same; only what is under the agent changes.
+
+```sh
+PB_WORKER=true PB_WORKDIR=$HOME/project PB_WORKER_PROMPT_FILE=$PWD/examples/worker-telegram-prompt.md bin/agent run
+```
+
+**What happens to a message.** The text becomes a message to the assistant; the final answer of its turn is sent to the chat as a
+reply. A message that comes while a turn runs waits in a queue (16 at most) and is given to the assistant in order. Stop (Esc)
+interrupts the running turn. `/clear` starts a new conversation; otherwise the conversation is kept across restarts of the agent
+and of the machine (the id is in `worker-session` in the state directory). The heartbeat tells the hub whether the worker is idle,
+working or waiting for permission, and what it has spent.
+
+**Permission.** When the assistant wants a tool that would prompt, the worker decides by a policy (below). What it does not decide
+goes to the chat as a dialog with a button for each choice, drawn as the terminal would draw it, so the same checks apply as for
+tmux: a button is bound to its dialog by a hash that includes the number of the request, so a tap on an old dialog, even for the
+same command, is refused with "no longer on the screen". `/screen` shows the dialog that waits, or a status. A dialog that gets no
+answer in `PB_WORKER_APPROVAL_TIMEOUT` is refused, and the assistant is told not to try another way. While a dialog waits, text
+from the chat is refused, as it is for a prompt in tmux.
+
+**The policy** (`PB_WORKER_POLICY_FILE`, JSON, [examples/worker-policy.json](examples/worker-policy.json)) has five lists, each
+replacing its default when present: `allow_tools` (tools that run without asking; the default is the helper tools TodoWrite and Task:
+the assistant allows reads inside the working directory itself, and a read outside it is a question for the chat), `allow_bash` (anchored regular expressions for commands that run without asking), `deny_bash` (refused without asking the
+chat), `risky_bash` (always put to the chat, flagged in the dialog with what is risky, even when an allow pattern matches: by default
+`kubectl apply`, `terraform apply`, `gh pr merge`, `git push`, `helm upgrade` and the like) and `risky_paths` (reads and writes of `.env`, keys,
+credentials and the bridge's own keys, flagged in the dialog). The assistant already runs harmless commands (`echo`, reading files) without asking, so the policy only sees what would
+prompt. It is a gate, not a sandbox: the assistant runs as the user of the agent, so give it a directory in `PB_WORKDIR`, keep the
+credentials of that user to what the work needs, and for unattended work use a user of its own.
+
+**What the assistant inherits.** Its process gets the environment of the agent without what belongs to the agent: the path of the
+agent's private key, the cloud credentials (`GOOGLE_APPLICATION_CREDENTIALS`), the chat tokens and the other `PB_*` settings, except
+the state directory, the working directory and the inbox settings that `agent send-file` needs. The files themselves are still
+readable by the same user, which is why a read of the bridge's keys, of `.ssh` or of `.env` is flagged and goes to the chat.
+
+**No interaction.** The user sends a message and waits for one answer, so the tools that need a person at a terminal (questions to
+the user, plan mode) are taken away from the assistant (`--disallowedTools`), and the policy refuses them if they are called all the
+same, with the advice to choose a sensible default and say what was assumed (`deny_tools` in the policy changes the list). The
+example instructions say the same in words, and add what is specific to a phone: no tables, short lines, answers that stand on their own.
+
+**Instructions for the assistant** (`PB_WORKER_PROMPT_FILE`, [examples/worker-telegram-prompt.md](examples/worker-telegram-prompt.md))
+are added to its system prompt: how to answer on a phone, how to ask (call the tool; the dialog is the question), how to send a file
+or a voice message, what never to print. The assistant's shell inherits the environment of the agent, so `agent send-file` works there when `agent` is on the `PATH` (and `PB_STATE_DIR` is set for the agent if it is not the default). The file is read each time the process starts, so a change applies from the next
+conversation (`/clear`) without a restart of the agent.
+
+**Settings of Claude Code.** The worker loads the `project` and `local` settings of `PB_WORKDIR` and leaves out the user's
+(`PB_WORKER_SETTING_SOURCES`), and it switches every hook off (`--settings '{"disableAllHooks":true}'`): the hooks of a project (the
+Stop hook of this bridge, for one) would send each answer to the chat a second time, since the worker sends it itself. Leaving the
+user's settings out matters for another reason: their `permissions.allow` rules (`Bash(kubectl *)`, say) let a command run without a
+dialog, and then the policy never sees it. The cost is that whatever the user's settings hold that the assistant needs, such as the
+variables of the API key or of a gateway (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`), must reach the agent in its environment; with
+launchd a small wrapper script can read them from `~/.claude/settings.json` and start the agent with them.
+
+**Limits.** `PB_WORKER_BUDGET_USD` caps what one process of the assistant may spend (the conversation is resumed in a new process,
+which has its own cap; the total is in the status); `PB_WORKER_TURN_TIMEOUT` interrupts a request that runs too long, and kills the
+process if it does not end within 30 seconds of that.
+
+**What is different from tmux.** There is no screen to navigate, so Up, Down, Enter and Tab do nothing; `/compact`, `/model` and the
+other commands of the terminal are not available (a text that starts with a slash goes to the assistant as it is, except `/clear`);
+the permission mode cannot be cycled from the chat (the policy replaces it); an answer arrives when the turn ends, not as it is
+written. In return there is nothing to scrape: a request is a message, an answer is a message, and a crash or a long wait is told to
+the chat in words.
+
 ## Configuration reference
 
 Every setting is an environment variable and most are also flags (`-name value`). Secrets are read from the environment or
@@ -465,6 +534,15 @@ unknown flag prints them too, and exits with 2).
 | `PB_HEAL` | `-heal` | `false` | Start Claude Code again when it has stopped or its tmux session is gone (needs `PB_WORKDIR`) |
 | `PB_ASSISTANT_COMMAND` | `-assistant-command` | `claude --continue` | What auto-heal and `/continue` run to start the assistant, one line: `claude --continue`, `opencode`, or a wrapper script. `PB_CLAUDE_COMMAND` and `-claude-command` are the older names of the same setting; a flag beats the environment, and the new name beats the old one |
 | `PB_ASSISTANT_NAME` | `-assistant-name` | `Claude Code` | What the chat calls the assistant in what the agent tells it ("opencode had stopped") |
+| `PB_WORKER` | `-worker` | off | Run the assistant without a terminal, as a child process in its headless mode ([Worker mode](#worker-mode-the-assistant-without-a-terminal)); needs `PB_WORKDIR` and is not used together with `PB_HEAL` |
+| `PB_WORKER_COMMAND` | `-worker-command` | `claude` | The assistant's program in worker mode |
+| `PB_WORKER_MODEL` | `-worker-model` | the assistant's own | The model the assistant uses in worker mode |
+| `PB_WORKER_BUDGET_USD` | `-worker-budget-usd` | `5` | The most one process of the assistant may spend, in USD; negative for no limit |
+| `PB_WORKER_PROMPT_FILE` | `-worker-prompt-file` | none | Absolute path of a file with extra instructions for the assistant, read at each start of its process |
+| `PB_WORKER_POLICY_FILE` | `-worker-policy-file` | the defaults | Absolute path of the JSON policy for requests for a tool |
+| `PB_WORKER_SETTING_SOURCES` | `-worker-setting-sources` | `project,local` | Which settings of Claude Code the assistant loads (`user`, `project`, `local`) |
+| `PB_WORKER_TURN_TIMEOUT` | `-worker-turn-timeout` | `30m` | How long one request may run before it is interrupted; `0` or `off` for no limit |
+| `PB_WORKER_APPROVAL_TIMEOUT` | `-worker-approval-timeout` | `30m` | How long a dialog waits for an answer before the request is refused |
 | `PB_HEAL_GRACE` | `-heal-grace` | `20s` | Claude Code must have been gone this long before auto-heal acts |
 | `PB_HEAL_TRIES`, `PB_HEAL_WINDOW` | `-heal-tries`, `-heal-window` | `3`, `10m` | Starts allowed within the window before auto-heal gives up |
 | `PB_STUCK_AFTER` | `-stuck-after` | `10m` | Tell the chat when a request has had no reply for this long; `0` or `off` turns it off |
@@ -484,9 +562,9 @@ the agent should be on `unary`: `session established` in its log every two minut
 
 Other agent commands: `agent send [-type reply|notice|alert] [TEXT | -]` queues a message for the hub (reads standard
 input for `-`); it only needs `PB_STATE_DIR` (and exits 1 when the body is too large once escaped for storage).
-`agent send-file [-caption TEXT] PATH` queues a file for the hub to upload to the chat; it needs only `PB_STATE_DIR` and
+`agent send-file [-caption TEXT] [-voice] PATH` queues a file for the hub to upload to the chat; it needs only `PB_STATE_DIR` and
 reads `PB_MAX_FILE_BYTES`. It exits 0 when queued, 1 when refused (not a regular file, empty or too large, a secret, a file
-in the inbox, more than 10 files a minute, the queue is full) and 2 on a usage error. `agent prompt` is what the Notification hook runs: it
+in the inbox, `-voice` for a file that is not ogg, mp3 or m4a, more than 10 files a minute, the queue is full) and 2 on a usage error. `agent prompt` is what the Notification hook runs: it
 reads the hook's JSON on standard input and queues a notice with the prompt from the screen and its buttons; it needs
 `PB_STATE_DIR` and tmux on the `PATH`. `agent unlock`
 lifts a lockdown, and is the only way to do it: it prints the path of the lock file it removed, and exits 1 with "no lock
@@ -623,6 +701,11 @@ make vuln            # govulncheck: known vulnerabilities in the code paths this
 `scripts/with-emulator.sh CMD` runs a command with an emulator available (it starts one with gcloud if
 `PUBSUB_EMULATOR_HOST` is unset, on port 18085 or `PB_EMULATOR_PORT`, and stops only that one). If something else already
 listens on that port it refuses to run instead of using or stopping it. Tests that need the emulator are skipped without it.
+
+The smoke tests of worker mode (`internal/smoke/worker_test.go`) need no emulator: they run the real `hub` and `agent` against the fake
+Pub/Sub server of the client library, built from the module `internal/smoke/pubsubfake` (a module of its own, so that the bridge does
+not depend on it; it needs the network the first time) and a fake Telegram, with a scripted assistant (needs `jq`). With
+`PB_TEST_REAL_CLAUDE=1` they, and the tests of `internal/worker`, start the real `claude` instead (small model, a budget of 0.25 USD).
 
 Layout: `internal/ratchet` (the double ratchet), `internal/handshake`, `internal/identity`, `internal/wire` (framing and
 payloads), `internal/transport` (Pub/Sub and an in-memory bus with attack helpers), `internal/hubsvc`,

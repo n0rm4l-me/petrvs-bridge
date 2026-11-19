@@ -23,8 +23,9 @@ type sentUpload struct {
 	chatID   string
 	caption  string
 	markup   string
-	field    string // "photo" or "document"
+	field    string // "photo", "voice" or "document"
 	filename string
+	partType string // the Content-Type of the file part
 	data     []byte
 	length   int64
 	ctype    string
@@ -45,10 +46,10 @@ func uploadServer(t *testing.T, answer func(n int, u sentUpload, w http.Response
 			return
 		}
 		u.chatID, u.caption, u.markup = r.FormValue("chat_id"), r.FormValue("caption"), r.FormValue("reply_markup")
-		for _, field := range []string{"photo", "document"} {
+		for _, field := range []string{"photo", "voice", "document"} {
 			if fh := r.MultipartForm.File[field]; len(fh) == 1 {
 				f, _ := fh[0].Open()
-				u.field, u.filename = field, fh[0].Filename
+				u.field, u.filename, u.partType = field, fh[0].Filename, fh[0].Header.Get("Content-Type")
 				u.data, _ = io.ReadAll(f)
 				f.Close()
 			}

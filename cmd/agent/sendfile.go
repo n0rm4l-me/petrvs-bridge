@@ -23,7 +23,7 @@ import (
 
 const (
 	// sfUsage is printed when the arguments do not fit.
-	sfUsage = "usage: agent send-file [-caption TEXT] PATH"
+	sfUsage = "usage: agent send-file [-caption TEXT] [-voice] PATH"
 	// sfCaptionBytes is how much of the caption is sent; Telegram shows at most 1024 characters, with the agent's tag.
 	sfCaptionBytes = 1000
 	// A looping assistant must not flood the chat: this many files per window for one state directory.
@@ -39,6 +39,7 @@ const (
 func sfSendFile(args []string, getenv func(string) string) int {
 	fs := flag.NewFlagSet("send-file", flag.ContinueOnError)
 	caption := fs.String("caption", "", "text shown with the file (at most 1000 bytes)")
+	voice := fs.Bool("voice", false, "send an audio file (ogg with Opus, mp3 or m4a) as a voice message")
 	// Flags may also follow the path.
 	var path string
 	rest := args
@@ -90,6 +91,10 @@ func sfSendFile(args []string, getenv func(string) string) int {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
+	if *voice && !filetx.IsVoice(name) {
+		fmt.Fprintf(os.Stderr, "error: %s is not a format that Telegram plays as a voice message (ogg with Opus, mp3 or m4a)\n", name)
+		return 1
+	}
 	sp, err := spool.Open(filepath.Join(dir, "spool"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -104,7 +109,7 @@ func sfSendFile(args []string, getenv func(string) string) int {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
-	if err := sfQueue(sp, filepath.Join(dir, "spool"), data, chunks, name, sfCaption(*caption)); err != nil {
+	if err := sfQueue(sp, filepath.Join(dir, "spool"), data, chunks, name, sfCaption(*caption), *voice); err != nil {
 		if errors.Is(err, spool.ErrFull) {
 			fmt.Fprintln(os.Stderr, "error: the queue is full")
 		} else {
@@ -285,9 +290,13 @@ func sfTakeSlot(dir string, clock func() time.Time) error {
 }
 
 // sfQueue puts the parts and then the closing item into the spool. If anything fails, the items this call added are
-// taken out again, so that half a file does not sit in the queue.
-func sfQueue(sp *spool.Spool, spoolDir string, data []byte, chunks [][]byte, name, caption string) (err error) {
+// taken out again, so that half a file does not sit in the queue. voice asks the chat to play the file as a voice message.
+func sfQueue(sp *spool.Spool, spoolDir string, data []byte, chunks [][]byte, name, caption string, voice bool) (err error) {
 	t := filetx.NewID()
+	kind := filetx.Kind(name, int64(len(data)))
+	if voice {
+		kind = "voice"
+	}
 	before := sfSpoolNames(spoolDir)
 	defer func() {
 		if err != nil {
@@ -302,7 +311,7 @@ func sfQueue(sp *spool.Spool, spoolDir string, data []byte, chunks [][]byte, nam
 	}
 	return sp.AddItem(spool.Item{Type: wire.TypeFile, Body: caption, Meta: map[string]string{
 		wire.MetaTransfer: t, wire.MetaParts: strconv.Itoa(len(chunks)), wire.MetaName: name,
-		wire.MetaSize: strconv.Itoa(len(data)), wire.MetaSHA: filetx.SHA(data), wire.MetaKind: filetx.Kind(name, int64(len(data))),
+		wire.MetaSize: strconv.Itoa(len(data)), wire.MetaSHA: filetx.SHA(data), wire.MetaKind: kind,
 	}})
 }
 

@@ -39,7 +39,7 @@ func TestAFileThatDoesNotFitLeavesNothingBehind(t *testing.T) {
 	sp, dir := sfSpool(t)
 	sfFill(t, dir, spool.MaxFiles-spool.FileReserve-2) // room for two more: the parts fit, the closing item does not
 	data := make([]byte, 200_000)
-	err := sfQueue(sp, dir, data, filetx.Chunks(data), "a.bin", "")
+	err := sfQueue(sp, dir, data, filetx.Chunks(data), "a.bin", "", false)
 	if err != spool.ErrFull {
 		t.Fatalf("err = %v", err)
 	}
@@ -58,7 +58,7 @@ func TestTakingTheFileBackLeavesWhatOthersQueuedAtTheSameTime(t *testing.T) {
 	}
 	other := sp.Len()
 	data := make([]byte, 200_000)
-	if err := sfQueue(sp, dir, data, filetx.Chunks(data), "a.bin", ""); err != spool.ErrFull {
+	if err := sfQueue(sp, dir, data, filetx.Chunks(data), "a.bin", "", false); err != spool.ErrFull {
 		t.Fatalf("err = %v", err)
 	}
 	if sp.Len() != other {
